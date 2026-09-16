@@ -77,6 +77,11 @@ def loop():
             store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
         time.sleep(POLL_SEC)
 
+def norm_symbol(s):
+    """AIN / ain / AINUSDT / ain/usdt 都變 AINUSDT；全是 U 本位。"""
+    s = (s or "").strip().upper().replace("/", "").replace("-", "").replace(" ", "")
+    return s if s.endswith("USDT") else s + "USDT"
+
 PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>pump-dump-hunter</title><style>
 body{font:14px -apple-system,sans-serif;background:#111;color:#ddd;margin:12px}
@@ -89,7 +94,7 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 </style>
 <div id=head>載入中…</div>
 <h2>回測（5m，三十天內）</h2>
-<div><input id=bs placeholder="AINUSDT" value="AINUSDT" style="width:110px"> <input id=bd type=number value=3 style="width:50px"> 天
+<div><input id=bs placeholder="AIN" value="AIN" style="width:90px"><span class=meta>USDT</span> <input id=bd type=number value=3 style="width:50px"> 天
 <button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div>
 <div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
 <h2>歷史事件掃描（全市場，3 天漲一倍後跌四成，最多 90 天；每個事件回測高點前 10 天～後 5 天，獨立程序執行）</h2>
@@ -164,7 +169,7 @@ class H(BaseHTTPRequestHandler):
             body, ct = json.dumps(s, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/backtest"):
             q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}
-            try: res = backtest.run(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
+            try: res = backtest.run(norm_symbol(q.get("s", "AIN")), min(int(q.get("d", "3")), 30))
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/signals/clear"):
@@ -187,11 +192,11 @@ class H(BaseHTTPRequestHandler):
             body, ct = json.dumps(sweep.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/diag"):
             q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}
-            try: res = backtest.diag_a(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
+            try: res = backtest.diag_a(norm_symbol(q.get("s", "AIN")), min(int(q.get("d", "3")), 30))
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/why"):
-            sym = self.path.split("s=")[-1].upper() if "s=" in self.path else ""
+            sym = norm_symbol(self.path.split("s=")[-1]) if "s=" in self.path else ""
             try: res = scanner.why(sym) if sym else dict(usage="/api/why?s=AINUSDT")
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
