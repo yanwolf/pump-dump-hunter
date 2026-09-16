@@ -1,7 +1,7 @@
 """Zeabur 入口：HTTP 狀態頁 + 背景 paper/live 迴圈。"""
 import json, os, threading, time, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep
+import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params
 from signals import ENGINES, LONG_ENGINES
 
 ENABLED = set(os.environ.get("ENGINES", "A,B,C,D,E").split(","))
@@ -61,8 +61,8 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 <h2>歷史事件掃描（全市場，3 天漲一倍後跌四成）</h2>
 <div><input id=sd type=number value=30 style="width:50px"> 天 <input id=sl placeholder="這次的標籤（可空）" style="width:140px">
 <button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button> <button onclick="swtoggle()">收合/展開</button> <button onclick="swclear()">清除</button></div>
-<div class=meta>覆蓋參數（JSON，可空＝用預設；K 線有快取，換參數重跑只要幾秒）：</div>
-<textarea id=so rows=3 style="width:100%;max-width:600px;background:#222;color:#ddd;border:1px solid #444;border-radius:6px;font-size:12px"></textarea>
+<div class=meta style="margin-top:6px">調參：改哪個就填哪個，沒動的用預設（括號內）。<button onclick="pform(true)">全部還原</button> <button onclick="ptoggle()">顯示/隱藏參數</button></div>
+<div id=pform style="display:none"></div>
 <div id=swout class=meta>（尚未執行）</div>
 <div id=live></div>
 <script>
@@ -91,8 +91,16 @@ if(r.error){o.innerHTML='錯誤: '+r.error;return}
 const c=r.counts;o.innerHTML=`${r.symbol} ${c.bars} 根 · 成立次數：hot ${c.hot} · pivot ${c.pivot} · top ${c.top} · vol ${c.vol} · (div ${c.div}，參考) · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>跌破中樞的棒（最近 40 根，UTC）：<br>`+
 T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','pivot','top','vol','div','fire'],x=>x.fire=='✅'?'long':'')}
 let swOpen=true;function swtoggle(){swOpen=!swOpen;swload()}
+let PS=[];function ptoggle(){const p=document.getElementById('pform');p.style.display=p.style.display=='none'?'block':'none'}
+async function pform(reset){if(!PS.length)PS=await (await fetch('/api/params')).json();
+let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+='<h2 style="font-size:13px;color:#fc6">'+g+'</h2>'}
+h+=`<div style="margin:4px 0 8px"><b>${s.label}</b> <span class=meta>(${s.default}${s.unit?' '+s.unit:''})</span>
+<input class=pv data-k="${s.k}" type=number step="${s.step}" placeholder="${s.default}" style="width:90px;margin-left:6px"><br><span class=meta>${s.help}</span></div>`}
+document.getElementById('pform').innerHTML=h}
+function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
 async function swclear(){if(!confirm('清除掃描結果？（K 線快取保留）'))return;await fetch('/api/sweep/clear');swload()}
-async function sw(){const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&l='+encodeURIComponent(document.getElementById('sl').value)+'&o='+encodeURIComponent(document.getElementById('so').value))).json();
+async function sw(){const o=pcollect();const lbl=document.getElementById('sl').value||Object.entries(o).map(([k,v])=>k.split('.').slice(-2).join('.')+'='+v).join(' ')||'預設';
+const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
 if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
 async function swload(){const o=document.getElementById('swout');const r=await (await fetch('/api/sweep')).json();
 if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','time','n','total','A','B','C','D','E']):'');return}
@@ -104,7 +112,7 @@ if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的
 else if(r.events&&r.events.length)h+='<br>事件：'+T(r.events,['symbol','peak_day','pump','dump']);
 if(r.trades&&r.trades.length)h+='<br>最大單筆（|R| 前 60）：'+T(r.trades,['symbol','time','engine','side','entry','exit','r','reason'],x=>x.r>0?'long':'short');
 o.innerHTML=h;if(r.status&&!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}
-load();swload();setInterval(load,60000);</script>"""
+load();swload();pform();setInterval(load,60000);</script>"""
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -115,14 +123,18 @@ class H(BaseHTTPRequestHandler):
             try: res = backtest.run(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/params"):
+            body, ct = json.dumps(params.schema(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep/clear"):
             sweep.clear(); body, ct = b'{"ok":true}', "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep/start"):
             import urllib.parse
             q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
             d = int(q.get("d", ["30"])[0]); ov = None; err = None
-            try: ov = json.loads(q["o"][0]) if q.get("o") and q["o"][0].strip() else None
-            except Exception as e: err = f"覆蓋參數不是合法 JSON: {e}"
+            try:
+                raw = json.loads(q["o"][0]) if q.get("o") and q["o"][0].strip() else None
+                ov = params.to_overrides(raw) if raw and not any(x in raw for x in ("ENGINE_A", "RISK", "EXIT")) else raw
+            except Exception as e: err = f"參數格式錯誤: {e}"
             ok = False if err else sweep.start(min(d, 30), ov, q.get("l", [""])[0])
             body, ct = json.dumps(dict(started=ok, error=err), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep"):
