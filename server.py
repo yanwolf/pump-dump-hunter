@@ -63,7 +63,9 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 <button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div>
 <div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
 <h2>歷史事件掃描（全市場，3 天漲一倍後跌四成，最多 90 天；每個事件回測高點前 10 天～後 5 天，獨立程序執行）</h2>
-<div><input id=sd type=number value=30 style="width:50px"> 天 <input id=sl placeholder="這次的標籤（可空）" style="width:140px">
+<div><input id=sd type=number value=30 style="width:50px"> 天
+<select id=sm style="background:#222;color:#ddd;border:1px solid #444;border-radius:6px;padding:6px"><option value=pump>拉高崩盤事件（3天漲一倍後跌四成，高點前10天～後5天）</option><option value=crash>崩盤日（單日跌30%，不管有沒有拉升，前後2天；去偏差）</option></select>
+<input id=sl placeholder="這次的標籤（可空）" style="width:140px">
 <button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button> <button onclick="swtoggle()">收合/展開</button> <button onclick="swclear()">清除</button></div>
 <div class=meta style="margin-top:6px">調參：改哪個就填哪個，沒動的用預設（括號內）。<button onclick="pform(true)">全部還原</button> <button onclick="ptoggle()">顯示/隱藏參數</button></div>
 <div id=pform style="display:none"></div>
@@ -104,7 +106,7 @@ document.getElementById('pform').innerHTML=h}
 function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
 async function swclear(){if(!confirm('清除掃描結果？（K 線快取保留）'))return;await fetch('/api/sweep/clear');swload()}
 async function sw(){const o=pcollect();const lbl=document.getElementById('sl').value||Object.entries(o).map(([k,v])=>k.split('.').slice(-2).join('.')+'='+v).join(' ')||'預設';
-const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
+const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&m='+document.getElementById('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
 if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
 async function swload(){const o=document.getElementById('swout');const r=await (await fetch('/api/sweep')).json();
 if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F']):'');return}
@@ -139,7 +141,7 @@ class H(BaseHTTPRequestHandler):
                 raw = json.loads(q["o"][0]) if q.get("o") and q["o"][0].strip() else None
                 ov = params.to_overrides(raw) if raw and not any(x in raw for x in ("ENGINE_A", "RISK", "EXIT")) else raw
             except Exception as e: err = f"參數格式錯誤: {e}"
-            ok = False if err else sweep.start(min(d, 90), ov, q.get("l", [""])[0])
+            ok = False if err else sweep.start(min(d, 90), ov, q.get("l", [""])[0], q.get("m", ["pump"])[0])
             body, ct = json.dumps(dict(started=ok, error=err), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep"):
             body, ct = json.dumps(sweep.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"

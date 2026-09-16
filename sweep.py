@@ -3,7 +3,8 @@
 import json, os, subprocess, sys, time, traceback
 
 EVENT = dict(pump_days=3, pump_gain=1.0, dump_drop=0.40, min_quote_vol=1e6,
-             before_days=10, after_days=5)     # 每個事件只回測高點前 10 天～後 5 天
+             before_days=10, after_days=5)     # 拉高崩盤模式：每個事件回測高點前 10 天～後 5 天
+CRASH = dict(day_drop=0.30, before_days=2, after_days=2)   # 崩盤日模式：單日從前收跌 >= 30%，不管有沒有拉升（去掉「事後知道會崩」的偏差）
 
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
 STATE = os.path.join(DATA_DIR, "sweep.json")
@@ -18,10 +19,10 @@ def state():
 def running():
     return _proc is not None and _proc.poll() is None
 
-def start(days=30, overrides=None, label=""):
+def start(days=30, overrides=None, label="", mode="pump"):
     global _proc
     if running(): return False
-    env = dict(os.environ, SWEEP_DAYS=str(days), SWEEP_LABEL=label or "",
+    env = dict(os.environ, SWEEP_DAYS=str(days), SWEEP_LABEL=label or "", SWEEP_MODE=mode,
                SWEEP_OVERRIDES=json.dumps(overrides or {}, ensure_ascii=False))
     _proc = subprocess.Popen([sys.executable, os.path.abspath(__file__)], env=env, cwd=os.path.dirname(os.path.abspath(__file__)))
     return True
@@ -66,20 +67,45 @@ def find_events(days, B):
         time.sleep(0.08)
     return events
 
+def find_crashes(days, B):
+    """崩盤日：任一天最低價相對前一日收盤跌 >= day_drop。每檔可有多個。"""
+    syms = B.perp_symbols(); tick = B.ticker_24h()
+    events, n = [], 0
+    for s in syms:
+        t = tick.get(s)
+        if not t or float(t["quoteVolume"]) < EVENT["min_quote_vol"]: continue
+        n += 1
+        try:
+            d = B.klines(s, "1d", days + 2)
+            for i in range(1, len(d)):
+                prev = d[i - 1]["c"]
+                if prev <= 0: continue
+                drop = 1 - d[i]["l"] / prev
+                if drop >= CRASH["day_drop"]:
+                    events.append(dict(symbol=s, peak_day=time.strftime("%m-%d", time.gmtime(d[i]["t"] / 1000)), peak_ts=d[i]["t"],
+                                       pump=round((max(x["h"] for x in d[max(0, i - 3):i]) / min(x["l"] for x in d[max(0, i - 3):i]) - 1) * 100),
+                                       dump=round(drop * 100)))
+        except Exception: pass
+        if n % 25 == 0: _write(status=f"掃描日線 {n} 檔，找到 {len(events)} 個崩盤日")
+        time.sleep(0.08)
+    return events
+
 def main():
     import binance as B, config as C, backtest
     days = int(os.environ.get("SWEEP_DAYS", "30")); label = os.environ.get("SWEEP_LABEL", "")
+    mode = os.environ.get("SWEEP_MODE", "pump"); W = CRASH if mode == "crash" else EVENT
     overrides = json.loads(os.environ.get("SWEEP_OVERRIDES") or "{}")
     try:
         _write(status="掃描中…", events=[], results=[], summary=[], trades=[], started=time.strftime("%m-%d %H:%M"))
-        events = _cached(f"events_{days}_{time.strftime('%Y%m%d')}", lambda: find_events(days, B))
+        events = _cached(f"events_{mode}_{days}_{time.strftime('%Y%m%d')}",
+                         lambda: (find_crashes if mode == "crash" else find_events)(days, B))
         C.apply_overrides(overrides)
         results, allt = [], []
         for i, ev in enumerate(events):
             _write(status=f"回測 {i + 1}/{len(events)} {ev['symbol']}", events=events, results=results)
             try:
-                a, b = ev["peak_ts"] - EVENT["before_days"] * 86400000, ev["peak_ts"] + EVENT["after_days"] * 86400000
-                k = _cached(f"{ev['symbol']}_5m_{ev['peak_ts']}", lambda: B.klines_range(ev["symbol"], "5m", a, b))
+                a, b = ev["peak_ts"] - W["before_days"] * 86400000, ev["peak_ts"] + W["after_days"] * 86400000
+                k = _cached(f"{ev['symbol']}_5m_{ev['peak_ts']}_{mode}", lambda: B.klines_range(ev["symbol"], "5m", a, b))
                 k1m = _cached(f"{ev['symbol']}_1m_{ev['peak_ts']}", lambda: B.klines_range(ev["symbol"], "1m", ev["peak_ts"] - 86400000, ev["peak_ts"] + 2 * 86400000))
                 tr = backtest.simulate_each(k, k1m)
                 for t in tr: t["symbol"] = ev["symbol"]; t["time"] = time.strftime("%m-%d %H:%M", time.gmtime(t["t"] / 1000))
@@ -90,7 +116,7 @@ def main():
             except Exception as e:
                 results.append(dict(**ev, error=str(e)))
         summ = backtest.summary(allt)
-        runs = (state().get("runs", []) + [dict(label=label or "預設", days=days, time=time.strftime("%m-%d %H:%M"),
+        runs = (state().get("runs", []) + [dict(label=(label or "預設") + ("｜崩盤日" if mode == "crash" else ""), days=days, time=time.strftime("%m-%d %H:%M"),
                  n=len(allt), total=round(sum(t["r"] for t in allt), 1),
                  **{x["engine"]: f"{x['n']}筆 PF{x['pf']} {x['exp']:+}" for x in summ})])[-12:]
         _write(status=f"完成：{len(events)} 個事件，{len(allt)} 筆交易，{time.strftime('%m-%d %H:%M')}" + (f"（{label}）" if label else ""),
