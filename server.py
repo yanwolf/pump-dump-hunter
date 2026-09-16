@@ -27,6 +27,7 @@ def loop():
                     sig = ENGINES[eid](k, len(k) - 1)
                     if not sig: continue
                     sz = risk.size(sig)
+                    if not sz: continue                      # 止損距離超過上限，略過
                     rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False)
                     if TRADE and C.API_KEY:
                         is_long = sig.side == "LONG"

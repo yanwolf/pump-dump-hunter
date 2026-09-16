@@ -22,10 +22,12 @@ SCAN = dict(
 
 # ---- 進場層 ----
 ENGINE_A = dict(  # 崩前：頂背馳 + 中樞跌破
-    pivot_bars=9,            # 中樞 = 最近 N 根 5m 的重疊區
-    lookback=48,             # 48 根內曾經偏離 MA20 >= dev
-    ma20_dev=0.30,
-    min_pivot_width=0.03,    # 中樞寬度 >= 3%，太窄=止損被插針
+    pivot_bars=36,           # 中樞 = 最近 3 小時（36 根 5m）的高低區間
+    hot_bars=288,            # 24h 內從低點漲幅 >= hot_gain 才算「拉過頭」
+    hot_gain=0.40,
+    div_bars=48,             # 頂背馳比較窗：最近 48 根的高點 vs 前 48 根的高點
+    min_pivot_width=0.03,    # 中樞寬度 >= 3%
+    max_pivot_width=0.25,    # 太寬不是盤整，是還在噴
 )
 ENGINE_B = dict(  # 崩後：死貓反彈做空
     crash_bars=12,           # 12 根 5m = 1h
@@ -34,6 +36,7 @@ ENGINE_B = dict(  # 崩後：死貓反彈做空
     bounce_min=0.20,         # 反彈幅度佔跌幅 20%~50%
     bounce_max=0.50,
     wait_bars=36,            # 崩後最多等 3 小時
+    after_hi_bars=8,         # 力竭必須在反彈高點後 8 根內，否則反彈早結束了
 )
 ENGINE_C = dict(  # 崩盤延續：單根崩盤棒破低追空
     bar_drop=0.15,           # 單根 5m 跌幅 >= 15%
@@ -65,6 +68,7 @@ RISK = dict(
     equity=500.0,
     risk_pct=0.02,           # 每筆最多賠本金 2%
     max_leverage=20,
+    max_stop_pct=0.25,       # 止損距離 > 25% 的訊號一律不進（賠率已經壞掉）
     tp1_r=1.0,               # 1R 出一半、止損移到成本
     trail_after_r=2.0,       # 2R 後用最近 3 根高點追蹤
     trail_bars=3,

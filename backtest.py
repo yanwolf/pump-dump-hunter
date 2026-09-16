@@ -34,7 +34,7 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
             continue
         for eid in engine_ids:
             sig = ENGINES[eid](k, i)
-            if sig:
+            if sig and sig.risk <= C.RISK["max_stop_pct"]:
                 d = 1 if sig.side == "LONG" else -1
                 open_ = dict(engine=eid, side=sig.side, dir=d, i=i, t=bar["t"], entry=sig.entry, stop=sig.stop,
                              r_unit=abs(sig.stop - sig.entry), tp1=False, half_pnl=0,

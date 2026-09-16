@@ -36,20 +36,25 @@ def engine_a_flags(k, i):
     if i < 60: return f
     win = k[:i + 1]
     closes = [x["c"] for x in win]
-    f["hot"] = any(win[j]["c"] / sma(closes[:j + 1], 20) - 1 >= P["ma20_dev"]
-                   for j in range(max(20, i - P["lookback"]), i))
-    if i >= 2 * P["lookback"]:
-        hi_idx = max(range(i - P["lookback"], i + 1), key=lambda j: win[j]["h"])
-        prev_hi_idx = max(range(i - 2 * P["lookback"], i - P["lookback"]), key=lambda j: win[j]["h"])
+    # hot：過去 hot_bars 內從最低點到最高點漲了 hot_gain 以上（資料不足就用現有的）
+    hb = win[-min(P["hot_bars"], i):]
+    lo = min(x["l"] for x in hb); hi = max(x["h"] for x in hb)
+    f["hot"] = lo > 0 and hi / lo - 1 >= P["hot_gain"]
+    # div：最近 div_bars 的高點 >= 前一個 div_bars 的高點，但 MACD 柱較弱
+    n = P["div_bars"]
+    if i >= 2 * n + 35:
+        hi_idx = max(range(i - n, i + 1), key=lambda j: win[j]["h"])
+        prev_hi_idx = max(range(i - 2 * n, i - n), key=lambda j: win[j]["h"])
         h_now, h_prev = macd_hist(closes[:hi_idx + 1]), macd_hist(closes[:prev_hi_idx + 1])
         if h_now is not None and h_prev is not None:
-            f["div"] = win[hi_idx]["h"] >= win[prev_hi_idx]["h"] and h_now < h_prev
+            f["div"] = win[hi_idx]["h"] >= win[prev_hi_idx]["h"] * 0.98 and h_now < h_prev
+    # pivot：最近 pivot_bars 根（不含本根）的高低區間
     seg = win[-P["pivot_bars"] - 1:-1]
-    zg, zd = min(x["h"] for x in seg), max(x["l"] for x in seg)
-    if zg > zd:
-        f["zd"], f["zg"], f["width"] = zd, zg, round((zg - zd) / zd * 100, 2)
-        f["pivot"] = (zg - zd) / zd >= P["min_pivot_width"]
-        f["brk"] = win[-1]["c"] < zd and win[-2]["c"] >= zd
+    zg, zd = max(x["h"] for x in seg), min(x["l"] for x in seg)
+    w = (zg - zd) / zd
+    f["zd"], f["zg"], f["width"] = zd, zg, round(w * 100, 2)
+    f["pivot"] = P["min_pivot_width"] <= w <= P["max_pivot_width"]
+    f["brk"] = win[-1]["c"] < zd and win[-2]["c"] >= zd
     return f
 
 def engine_a(k, i):
@@ -78,7 +83,9 @@ def engine_b(k, i):
         # 找到崩盤；崩後反彈區間
         after = win[start + low_idx + 1:]
         if len(after) < 3: return None
-        bounce_hi = max(x["h"] for x in after)
+        hi_rel = max(range(len(after)), key=lambda j: after[j]["h"])
+        bounce_hi = after[hi_rel]["h"]
+        if len(after) - 1 - hi_rel > P["after_hi_bars"]: return None   # 反彈高點太久以前，反彈已結束
         ratio = (bounce_hi - low) / (top - low)
         if not (P["bounce_min"] <= ratio <= P["bounce_max"]): continue
         bar, prev = win[-1], win[-2]
