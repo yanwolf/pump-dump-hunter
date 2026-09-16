@@ -40,7 +40,8 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
             cd = {**C.RISK, **C.EXIT.get(eid, {})}["cooldown_bars"]
             if eid in last_exit and i - last_exit[eid] < cd: continue
             sig = ENGINES[eid](k, i)
-            if sig and C.RISK["min_stop_pct"] <= sig.risk <= C.RISK["max_stop_pct"]:
+            R_ = {**C.RISK, **C.EXIT.get(eid, {})}
+            if sig and R_["min_stop_pct"] <= sig.risk <= R_["max_stop_pct"]:
                 d = 1 if sig.side == "LONG" else -1
                 open_ = dict(engine=eid, side=sig.side, dir=d, i=i, t=bar["t"], entry=sig.entry, stop=sig.stop,
                              r_unit=abs(sig.stop - sig.entry), tp1=False, be=False, half_pnl=0,
@@ -53,10 +54,14 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
                            r=round(r_total, 2), reason="eod", bars=len(k) - 1 - t["i"]))
     return trades
 
-def simulate_each(k):
-    """三個引擎各自獨立跑，互不佔用倉位，才能公平比較。"""
+def simulate_each(k, k1m=None):
+    """各引擎獨立跑，互不佔用倉位；1m 引擎用 k1m。"""
+    from signals import ENGINE_TF
     out = []
-    for e in ENGINES: out += simulate(k, (e,))
+    for e in ENGINES:
+        if ENGINE_TF.get(e) == "1m":
+            if k1m: out += simulate(k1m, (e,))
+        else: out += simulate(k, (e,))
     return sorted(out, key=lambda t: t["t"])
 
 def summary(trades):
@@ -72,7 +77,8 @@ def summary(trades):
 
 def run(symbol, days):
     end = int(time.time() * 1000); k = B.klines_range(symbol, "5m", end - days * 86400000, end)
-    tr = simulate_each(k)
+    k1m = B.klines_range(symbol, "1m", end - min(days, 7) * 86400000, end)   # 1m 只抓最近 7 天
+    tr = simulate_each(k, k1m)
     for t in tr: t["time"] = time.strftime("%m-%d %H:%M", time.gmtime(t["t"] / 1000)) + " UTC"
     return dict(symbol=symbol, days=days, bars=len(k), trades=tr, summary=summary(tr))
 

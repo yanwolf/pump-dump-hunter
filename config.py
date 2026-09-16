@@ -61,6 +61,15 @@ ENGINE_E = dict(  # 拉升初期突破回踩跟多（多）
     pull_tol=0.04,           # 回踩到突破位 +4% 以內
 )
 
+ENGINE_F = dict(  # 崩盤進行中順勢追空（1m K 線）：抓清算連鎖啟動的前幾分鐘
+    window=15,               # 看最近 15 根 1m
+    drop=0.10,               # 15 分鐘內從高到現在跌 >= 10%
+    red_bars=3,              # 最近 N 根全部收黑
+    vol_mult=4.0,            # 最近 3 根平均量 >= 4x MAVOL20（1m）
+    stop_bars=5,             # 止損放最近 5 根 1m 高點
+    min_stop=0.03,           # 止損距離至少 3%（1m 太貼容易被掃）
+)
+
 # 各引擎出場覆蓋（沒寫的用 RISK 預設）
 EXIT = dict(
     A=dict(tp1_r=None, be_r=1.0, trail_after_r=2.0, trail_bars=3, max_hold_bars=144, cooldown_bars=48),  # 不減碼；出場後 4h 冷卻
@@ -68,6 +77,8 @@ EXIT = dict(
     C=dict(cooldown_bars=24),
     D=dict(max_hold_bars=24, trail_after_r=1.5, trail_bars=3, cooldown_bars=48),
     E=dict(max_hold_bars=288, trail_after_r=2.0, trail_bars=12, cooldown_bars=288),  # 一天最多一次
+    F=dict(tp1_r=None, be_r=1.0, trail_after_r=1.5, trail_bars=3, max_hold_bars=60, cooldown_bars=30,
+           min_stop_pct=0.03),   # 1m 引擎：不減碼、1R 保本、1.5R 起 3 根高點追蹤、最多 60 分鐘
 )
 
 # ---- 風控（低勝率高賠率的核心）----
@@ -90,7 +101,7 @@ RISK = dict(
 def apply_overrides(o):
     """回測/掃描用：以 dict 覆蓋參數，回傳還原用的快照。格式 {"ENGINE_A": {...}, "EXIT": {"A": {...}}, "RISK": {...}}"""
     import copy
-    snap = {k: copy.deepcopy(globals()[k]) for k in ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "EXIT", "RISK")}
+    snap = {k: copy.deepcopy(globals()[k]) for k in ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "ENGINE_F", "EXIT", "RISK")}
     for k, v in (o or {}).items():
         if k not in snap or not isinstance(v, dict): continue
         if k == "EXIT":

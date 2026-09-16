@@ -2,7 +2,7 @@
 import json, os, threading, time, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params
-from signals import ENGINES, LONG_ENGINES
+from signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "B,C").split(","))
 TRADE = os.environ.get("TRADE", "0") == "1"          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
@@ -21,10 +21,14 @@ def loop():
                 store.update(watch=w, observe=o, last_scan=time.strftime("%Y-%m-%d %H:%M:%S"))
             for s in list(watch):
                 k = B.klines(s, "5m", 300)
-                if last.get(s) == k[-1]["t"]: continue
-                last[s] = k[-1]["t"]
+                k1m = B.klines(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
                 for eid in ENABLED:
-                    sig = ENGINES[eid](k, len(k) - 1)
+                    kk = k1m if ENGINE_TF.get(eid) == "1m" else k
+                    if not kk: continue
+                    tag = f"{s}:{eid}"
+                    if last.get(tag) == kk[-1]["t"]: continue     # 同一根不重複判斷
+                    last[tag] = kk[-1]["t"]
+                    sig = ENGINES[eid](kk, len(kk) - 1)
                     if not sig: continue
                     sz = risk.size(sig)
                     if not sz: continue                      # 止損距離超過上限，略過
@@ -58,7 +62,7 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 <div><input id=bs placeholder="AINUSDT" value="AINUSDT" style="width:110px"> <input id=bd type=number value=3 style="width:50px"> 天
 <button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div>
 <div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
-<h2>歷史事件掃描（全市場，3 天漲一倍後跌四成，最多 90 天）</h2>
+<h2>歷史事件掃描（全市場，3 天漲一倍後跌四成，最多 90 天；每個事件回測高點前 10 天～後 5 天，獨立程序執行）</h2>
 <div><input id=sd type=number value=30 style="width:50px"> 天 <input id=sl placeholder="這次的標籤（可空）" style="width:140px">
 <button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button> <button onclick="swtoggle()">收合/展開</button> <button onclick="swclear()">清除</button></div>
 <div class=meta style="margin-top:6px">調參：改哪個就填哪個，沒動的用預設（括號內）。<button onclick="pform(true)">全部還原</button> <button onclick="ptoggle()">顯示/隱藏參數</button></div>
@@ -103,12 +107,12 @@ async function sw(){const o=pcollect();const lbl=document.getElementById('sl').v
 const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
 if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
 async function swload(){const o=document.getElementById('swout');const r=await (await fetch('/api/sweep')).json();
-if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','time','n','total','A','B','C','D','E']):'');return}
+if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F']):'');return}
 let h='<b>'+r.status+'</b>';
-if(r.runs&&r.runs.length)h+='<br>歷次比較（total=全部 R 合計）：'+T(r.runs,['label','time','n','total','A','B','C','D','E'],x=>x.total>0?'long':'');
+if(r.runs&&r.runs.length)h+='<br>歷次比較（total=全部 R 合計）：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F'],x=>x.total>0?'long':'');
 if(!swOpen){o.innerHTML=h+'<br>（已收合）';return}
 if(r.summary&&r.summary.length)h+='<br>各引擎彙整：'+T(r.summary,['engine','n','win','exp','pf','best','worst']);
-if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的合計 R）：'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E'],x=>['R_A','R_B','R_C','R_D','R_E'].some(k=>x[k]>0)?'long':'');
+if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的合計 R）：'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E','R_F'],x=>['R_A','R_B','R_C','R_D','R_E','R_F'].some(k=>x[k]>0)?'long':'');
 else if(r.events&&r.events.length)h+='<br>事件：'+T(r.events,['symbol','peak_day','pump','dump']);
 if(r.trades&&r.trades.length)h+='<br>最大單筆（|R| 前 60）：'+T(r.trades,['symbol','time','engine','side','entry','exit','r','reason'],x=>x.r>0?'long':'short');
 o.innerHTML=h;if(r.status&&!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}
@@ -138,7 +142,7 @@ class H(BaseHTTPRequestHandler):
             ok = False if err else sweep.start(min(d, 90), ov, q.get("l", [""])[0])
             body, ct = json.dumps(dict(started=ok, error=err), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep"):
-            body, ct = json.dumps(store.get().get("sweep", {}), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+            body, ct = json.dumps(sweep.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/diag"):
             q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}
             try: res = backtest.diag_a(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))

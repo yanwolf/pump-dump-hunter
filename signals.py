@@ -227,5 +227,21 @@ def engine_e(k, i):
         return None
     return None
 
-ENGINES = {"A": engine_a, "B": engine_b, "C": engine_c, "D": engine_d, "E": engine_e}
+# ---------- F：崩盤進行中順勢追空（1m）----------
+def engine_f(k, i):
+    P = C.ENGINE_F
+    if i < 40: return None
+    win = k[:i + 1]
+    seg = win[-P["window"]:]
+    hi = max(x["h"] for x in seg); bar = win[-1]
+    if hi <= 0 or 1 - bar["c"] / hi < P["drop"]: return None
+    if any(x["c"] >= x["o"] for x in win[-P["red_bars"]:]): return None
+    mavol = sum(x["v"] for x in win[-23:-3]) / 20
+    if mavol <= 0 or sum(x["v"] for x in win[-3:]) / 3 < P["vol_mult"] * mavol: return None
+    stop = max(x["h"] for x in win[-P["stop_bars"]:])
+    stop = max(stop, bar["c"] * (1 + P["min_stop"]))
+    return Signal("F", "SHORT", bar["c"], stop, f"15m跌{1 - bar['c'] / hi:.0%} 連黑放量，清算連鎖追空")
+
+ENGINES = {"A": engine_a, "B": engine_b, "C": engine_c, "D": engine_d, "E": engine_e, "F": engine_f}
 LONG_ENGINES = {"D", "E"}
+ENGINE_TF = {"F": "1m"}          # 沒列的都是 5m
