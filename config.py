@@ -30,6 +30,7 @@ ENGINE_A = dict(  # 崩前：頂背馳 + 中樞跌破
     max_pivot_width=0.25,    # 太寬不是盤整，是還在噴
     near_top=0.85,           # 中樞上緣 >= 24h 高點的 85%，排除拉升途中的回檔
     brk_vol_mult=1.5,        # 跌破棒量 >= 1.5x MAVOL20
+    top_age_bars=12,         # 區間高點至少 N 根前做的（0=不檢查）；過濾「還在噴的回檔」
 )
 ENGINE_B = dict(  # 崩後：死貓反彈做空
     crash_bars=12,           # 12 根 5m = 1h
@@ -61,6 +62,7 @@ ENGINE_E = dict(  # 拉升初期突破回踩跟多（多）
 
 # 各引擎出場覆蓋（沒寫的用 RISK 預設）
 EXIT = dict(
+    A=dict(tp1_r=None, be_r=1.0, trail_after_r=2.0, trail_bars=3, max_hold_bars=144),  # 不減碼：1R 移到成本，放著跑
     D=dict(max_hold_bars=24, trail_after_r=1.5, trail_bars=3),     # 快進快出，只吃第一段反彈
     E=dict(max_hold_bars=288, trail_after_r=2.0, trail_bars=12),   # 拿久一點，用 1h 級別高低追蹤
 )
@@ -71,7 +73,8 @@ RISK = dict(
     risk_pct=0.02,           # 每筆最多賠本金 2%
     max_leverage=20,
     max_stop_pct=0.25,       # 止損距離 > 25% 的訊號一律不進（賠率已經壞掉）
-    tp1_r=1.0,               # 1R 出一半、止損移到成本
+    tp1_r=1.0,               # 1R 出一半、止損移到成本（None = 不減碼）
+    be_r=None,               # 不減碼時，到幾 R 把止損移到成本
     trail_after_r=2.0,       # 2R 後用最近 3 根高點追蹤
     trail_bars=3,
     max_hold_bars=72,        # 最多持有 6 小時

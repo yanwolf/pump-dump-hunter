@@ -15,13 +15,16 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
             hit_stop = adv <= t["stop"] if d > 0 else adv >= t["stop"]
             if hit_stop:
                 exit_px = t["stop"] * (1 - d * R["slippage"]); reason = "stop"
-            elif not t["tp1"] and r_now >= R["tp1_r"]:
+            elif R["tp1_r"] is not None and not t["tp1"] and r_now >= R["tp1_r"]:
                 t["tp1"] = True; t["stop"] = t["entry"]; t["half_pnl"] = 0.5 * R["tp1_r"]
+                continue
+            elif R["tp1_r"] is None and not t["be"] and R.get("be_r") and r_now >= R["be_r"]:
+                t["be"] = True; t["stop"] = t["entry"]            # 不減碼，只保本
                 continue
             elif i - t["i"] >= R["max_hold_bars"]:
                 exit_px = bar["c"]; reason = "time"
             else:
-                if t["tp1"] and r_now >= R["trail_after_r"]:
+                if (t["tp1"] or t["be"]) and r_now >= R["trail_after_r"]:
                     seg = k[i - R["trail_bars"]:i + 1]
                     t["stop"] = max(t["stop"], min(x["l"] for x in seg)) if d > 0 else min(t["stop"], max(x["h"] for x in seg))
                 continue
@@ -37,7 +40,7 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
             if sig and sig.risk <= C.RISK["max_stop_pct"]:
                 d = 1 if sig.side == "LONG" else -1
                 open_ = dict(engine=eid, side=sig.side, dir=d, i=i, t=bar["t"], entry=sig.entry, stop=sig.stop,
-                             r_unit=abs(sig.stop - sig.entry), tp1=False, half_pnl=0,
+                             r_unit=abs(sig.stop - sig.entry), tp1=False, be=False, half_pnl=0,
                              R={**C.RISK, **C.EXIT.get(eid, {})})
                 break
     if open_:  # 資料結束仍持倉，用最後收盤結算

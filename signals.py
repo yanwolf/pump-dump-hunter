@@ -55,6 +55,9 @@ def engine_a_flags(k, i):
     f["zd"], f["zg"], f["width"] = zd, zg, round(w * 100, 2)
     f["pivot"] = P["min_pivot_width"] <= w <= P["max_pivot_width"]
     f["top"] = zg >= hi * P["near_top"]
+    if f["top"] and P.get("top_age_bars", 0):
+        hi_pos = max(range(len(seg)), key=lambda j: seg[j]["h"])       # 區間高點在 seg 內的位置
+        f["top"] = (len(seg) - 1 - hi_pos) >= P["top_age_bars"]
     mavol = sum(x["v"] for x in win[-21:-1]) / 20
     f["vol"] = mavol > 0 and win[-1]["v"] >= P["brk_vol_mult"] * mavol
     f["brk"] = win[-1]["c"] < zd and win[-2]["c"] >= zd
