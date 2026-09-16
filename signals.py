@@ -32,7 +32,7 @@ def macd_hist(closes):
 def engine_a_flags(k, i):
     """回傳各條件旗標，診斷用；engine_a 只在全部成立時給 Signal。"""
     P = C.ENGINE_A
-    f = dict(hot=False, div=False, pivot=False, brk=False, zd=None, zg=None, width=None)
+    f = dict(hot=False, div=False, pivot=False, top=False, vol=False, brk=False, zd=None, zg=None, width=None)
     if i < 60: return f
     win = k[:i + 1]
     closes = [x["c"] for x in win]
@@ -54,13 +54,16 @@ def engine_a_flags(k, i):
     w = (zg - zd) / zd
     f["zd"], f["zg"], f["width"] = zd, zg, round(w * 100, 2)
     f["pivot"] = P["min_pivot_width"] <= w <= P["max_pivot_width"]
+    f["top"] = zg >= hi * P["near_top"]
+    mavol = sum(x["v"] for x in win[-21:-1]) / 20
+    f["vol"] = mavol > 0 and win[-1]["v"] >= P["brk_vol_mult"] * mavol
     f["brk"] = win[-1]["c"] < zd and win[-2]["c"] >= zd
     return f
 
 def engine_a(k, i):
     f = engine_a_flags(k, i)
-    if f["hot"] and f["div"] and f["pivot"] and f["brk"]:
-        return Signal("A", "SHORT", k[i]["c"], f["zg"], f"頂背馳後跌破中樞 [{f['zd']:.5g},{f['zg']:.5g}]")
+    if f["hot"] and f["pivot"] and f["top"] and f["vol"] and f["brk"]:
+        return Signal("A", "SHORT", k[i]["c"], f["zg"], f"頂部中樞放量跌破 [{f['zd']:.5g},{f['zg']:.5g}]" + (" 背馳" if f["div"] else ""))
     return None
 
 # ---------- B：崩後，死貓反彈力竭做空 ----------

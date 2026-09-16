@@ -74,17 +74,18 @@ def diag_a(symbol, days):
     """引擎 A 診斷：列出所有「跌破中樞」的棒，以及它們被哪個條件擋掉。"""
     from signals import engine_a_flags
     end = int(time.time() * 1000); k = B.klines_range(symbol, "5m", end - days * 86400000, end)
-    rows, cnt = [], dict(bars=len(k), hot=0, div=0, pivot=0, brk=0, all=0)
+    need = ("hot", "pivot", "top", "vol")
+    rows, cnt = [], dict(bars=len(k), hot=0, pivot=0, top=0, vol=0, div=0, brk=0, all=0)
     for i in range(len(k)):
         f = engine_a_flags(k, i)
-        for key in ("hot", "div", "pivot", "brk"): cnt[key] += bool(f[key])
+        for key in need + ("div", "brk"): cnt[key] += bool(f[key])
         if f["brk"]:
-            ok = f["hot"] and f["div"] and f["pivot"]
+            ok = all(f[x] for x in need)
             cnt["all"] += ok
             rows.append(dict(time=time.strftime("%m-%d %H:%M", time.gmtime(k[i]["t"] / 1000)),
                              close=k[i]["c"], zd=f["zd"], zg=f["zg"], width=f["width"],
-                             hot=f["hot"], div=f["div"], pivot=f["pivot"], fire="✅" if ok else
-                             "缺:" + ",".join(x for x in ("hot", "div", "pivot") if not f[x])))
+                             hot=f["hot"], pivot=f["pivot"], top=f["top"], vol=f["vol"], div=f["div"],
+                             fire="✅" if ok else "缺:" + ",".join(x for x in need if not f[x])))
     return dict(symbol=symbol, counts=cnt, breaks=rows[-40:])
 
 def report(trades):

@@ -28,6 +28,8 @@ ENGINE_A = dict(  # 崩前：頂背馳 + 中樞跌破
     div_bars=48,             # 頂背馳比較窗：最近 48 根的高點 vs 前 48 根的高點
     min_pivot_width=0.03,    # 中樞寬度 >= 3%
     max_pivot_width=0.25,    # 太寬不是盤整，是還在噴
+    near_top=0.85,           # 中樞上緣 >= 24h 高點的 85%，排除拉升途中的回檔
+    brk_vol_mult=1.5,        # 跌破棒量 >= 1.5x MAVOL20
 )
 ENGINE_B = dict(  # 崩後：死貓反彈做空
     crash_bars=12,           # 12 根 5m = 1h
