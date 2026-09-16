@@ -79,7 +79,7 @@ def set_leverage(symbol, lev):
     return _post("/fapi/v1/leverage", dict(symbol=symbol, leverage=int(lev)))
 
 def market_order(symbol, side, qty, reduce_only=False):
-    p = dict(symbol=symbol, side=side, type="MARKET", quantity=qty)
+    p = dict(symbol=symbol, side=side, type="MARKET", quantity=qty, newOrderRespType="RESULT")   # RESULT 才有 avgPrice
     if position_mode_hedge():
         p["positionSide"] = "SHORT" if (side == "SELL") != reduce_only else "LONG"
     elif reduce_only:

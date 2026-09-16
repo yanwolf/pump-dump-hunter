@@ -8,6 +8,21 @@ ENABLED = set(os.environ.get("ENGINES", "B,C,F").split(","))
 TRADE = os.environ.get("TRADE", "0") == "1"          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
 SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 
+def reconcile():
+    """跟交易所對帳：自己開的倉不在了 → 標記平倉。回傳 (自己還在場的倉數, 交易所全部持倉)。"""
+    own = store.get().get("open", {})
+    if not C.API_KEY: return 0, []
+    ex = B.open_positions()
+    ex_syms = {p["symbol"] for p in ex}
+    still, changed = {}, False
+    for sym, rec in own.items():
+        if sym in ex_syms: still[sym] = rec
+        else:
+            rec = dict(rec, closed=time.strftime("%m-%d %H:%M")); store.push("closed", rec); changed = True
+            telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 已平倉（止損/追蹤觸發）")
+    if changed or len(still) != len(own): store.update(open=still)
+    return len(still), ex
+
 def loop():
     store.update(started=time.strftime("%Y-%m-%d %H:%M:%S"))
     telegram.send(f"🎯 pump-dump-hunter 啟動 engines={sorted(ENABLED)} trade={TRADE} testnet={C.USE_TESTNET}")
@@ -19,6 +34,9 @@ def loop():
                 watch = {r["symbol"]: r for r in w}
                 last_scan = time.time()
                 store.update(watch=w, observe=o, last_scan=time.strftime("%Y-%m-%d %H:%M:%S"))
+            if TRADE and C.API_KEY:
+                try: reconcile()
+                except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} reconcile {e}")
             for s in list(watch):
                 k = B.klines(s, "5m", 300)
                 k1m = B.klines(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
@@ -34,18 +52,26 @@ def loop():
                     if not sz: continue                      # 止損距離超過上限，略過
                     rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False)
                     if TRADE and C.API_KEY:
-                        opened = B.open_positions()
-                        if len(opened) >= C.SIZING["max_positions"] or any(p["symbol"] == s for p in opened):
-                            rec["skipped"] = f"持倉已 {len(opened)} 筆或該幣已有倉"; store.push("signals", rec)
-                            telegram.send(f"⏸ 略過 {s} 引擎{eid}：{rec['skipped']}"); break
+                        n_own, ex = reconcile()
+                        if n_own >= C.SIZING["max_positions"]:
+                            rec["skipped"] = f"本策略持倉已 {n_own} 筆"
+                        elif any(p["symbol"] == s for p in ex):
+                            rec["skipped"] = "該幣帳號內已有倉（可能是其他專案）"
+                        if rec.get("skipped"):
+                            store.push("signals", rec); telegram.send(f"⏸ 略過 {s} 引擎{eid}：{rec['skipped']}"); break
                         is_long = sig.side == "LONG"
                         B.set_leverage(s, sz["leverage"])
-                        B.market_order(s, "BUY" if is_long else "SELL", round(sz["qty"]))
+                        o = B.market_order(s, "BUY" if is_long else "SELL", round(sz["qty"]))
+                        fill = float(o.get("avgPrice") or 0) or None
                         B.stop_order(s, "SELL" if is_long else "BUY", round(sz["qty"]), round(sig.stop, 6))
-                        rec["executed"] = True; store.push("trades", rec)
+                        rec["executed"] = True; rec["fill"] = fill
+                        rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
+                        store.push("trades", rec)
+                        own = dict(store.get().get("open", {})); own[s] = dict(engine=eid, side=sig.side, time=rec["time"], entry=sig.entry, fill=fill, stop=sig.stop, qty=round(sz["qty"]))
+                        store.update(open=own)
                     store.push("signals", rec)
                     telegram.send(f"{'✅下單' if rec['executed'] else '👀訊號'} {s} 引擎{eid} {'多' if sig.side == 'LONG' else '空'} @{sig.entry:.5g} "
-                                  f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U\n{sig.reason}")
+                                  f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U" + (f" 成交{rec['fill']:.5g} 滑價{rec['slip_pct']}%" if rec.get("fill") else "") + f"\n{sig.reason}")
                     break
         except Exception as e:
             store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
@@ -82,10 +108,12 @@ async function load(){const s=await (await fetch('/api/state')).json();const sig
 document.getElementById('head').innerHTML=`<b>pump-dump-hunter</b>
 <div class=meta>啟動 ${s.started} · 上次掃描 ${s.last_scan||'—'} · 即時區每 60 秒刷新</div>
 <div class=meta>本金階梯：餘額 ${s.equity&&s.equity.balance!=null?s.equity.balance.toFixed(1)+' U':'（未讀取' + (s.equity&&s.equity.error?'：'+s.equity.error:'') + '）'} → 階梯 <b>${s.equity?s.equity.tier:'—'} U</b> × ${s.equity?(1-s.equity.reserve_pct)*100:''}% = 可用 <b>${s.equity?(s.equity.tier*(1-s.equity.reserve_pct)).toFixed(0):'—'} U</b>（上限 ${s.equity?s.equity.cap:''}，${s.equity?s.equity.leverage:''}x，最多 ${s.equity?s.equity.max_positions:''} 筆，每筆保證金 ≤ ${s.equity?(s.equity.tier*(1-s.equity.reserve_pct)/s.equity.max_positions).toFixed(0):'—'} U）</div>
-<div><span class=pill>擁擠名單 ${s.watch.length}</span><span class=pill>觀察 ${s.observe.length}</span><span class=pill>訊號 ${s.signals.length}</span><span class=pill>已下單 ${s.trades.length}</span></div>`;
+<div><span class=pill>本策略持倉 ${Object.keys(s.open||{}).length}</span><span class=pill>擁擠名單 ${s.watch.length}</span><span class=pill>觀察 ${s.observe.length}</span><span class=pill>訊號 ${s.signals.length}</span><span class=pill>已下單 ${s.trades.length}</span></div>`;
 document.getElementById('live').innerHTML=`
 <h2>擁擠名單（引擎正在盯）</h2>${T(s.watch,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'])}
-<h2>訊號（最新在上） <button onclick="sigclear()" style="font-size:12px;padding:3px 8px">清除訊號紀錄</button></h2>${T(sig,['time','symbol','engine','side','entry','stop','stop_pct','equity','usable','margin','notional','executed','skipped','reason'],r=>r.side=='LONG'?'long':'short')}
+<h2>本策略持倉（${Object.keys(s.open||{}).length}）</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty'])}
+<h2>已平倉（最新在上）</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','time','entry','fill','stop','qty'])}
+<h2>訊號（最新在上） <button onclick="sigclear()" style="font-size:12px;padding:3px 8px">清除訊號紀錄</button></h2>${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','equity','margin','notional','executed','skipped','reason'],r=>r.side=='LONG'?'long':'short')}
 <h2>觀察名單（24h 漲幅前 60，依熱度排；主流幣已排除）</h2><div class=meta>score = g/d/o/f 四項各 1 分，≥3 進擁擠名單 · hits: g=48h漲幅 d=偏離MA20 o=OI增幅 f=資金費率 💥=24h跌超30% 🔥=24h漲超40%（兩者都直接進引擎監控） · 百分比單位</div>
 ${T(s.observe,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'],r=>r.score>=3?'hot':r.score==2?'warm':'')}
 <h2>錯誤</h2><div class=meta>${s.errors.slice(-10).reverse().join('<br>')||'（無）'}</div>`}
