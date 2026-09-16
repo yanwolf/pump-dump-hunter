@@ -232,6 +232,10 @@ def engine_f(k, i):
     P = C.ENGINE_F
     if i < 40: return None
     win = k[:i + 1]
+    if P.get("min_gain_24h"):                                  # 只做已經漲瘋的幣
+        day = win[-min(1440, i):]
+        lo24 = min(x["l"] for x in day); hi24 = max(x["h"] for x in day)
+        if lo24 <= 0 or hi24 / lo24 - 1 < P["min_gain_24h"]: return None
     seg = win[-P["window"]:]
     hi = max(x["h"] for x in seg); bar = win[-1]
     if hi <= 0 or 1 - bar["c"] / hi < P["drop"]: return None

@@ -49,6 +49,8 @@ SCHEMA = [
   # ---- F ----
   dict(g="F 崩盤進行中追空（1m，清算連鎖）", k="ENGINE_F.drop", label="15分鐘跌幅", unit="", step=0.02,
        help="最近 15 根 1m 從高點到現在至少跌幾 %（0.10）才算連鎖啟動。調小：更早進但假訊號多"),
+  dict(g="F 崩盤進行中追空（1m，清算連鎖）", k="ENGINE_F.min_gain_24h", label="24h 漲幅門檻", unit="", step=0.1,
+       help="進場當下 24h 從低到高至少漲幾 %（0.4）才做。0=不限制（回測會包含拉升初期的洗盤，PF 偏低）"),
   dict(g="F 崩盤進行中追空（1m，清算連鎖）", k="ENGINE_F.vol_mult", label="放量倍數", unit="×MAVOL", step=1,
        help="最近 3 根 1m 平均量要是均量幾倍（4）。清算連鎖一定放量，這是主要過濾器"),
   dict(g="F 崩盤進行中追空（1m，清算連鎖）", k="ENGINE_F.red_bars", label="連黑根數", unit="根1m", step=1,
