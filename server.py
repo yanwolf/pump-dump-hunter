@@ -62,7 +62,7 @@ document.getElementById('app').innerHTML=`<b>pump-dump-hunter</b>
 ${T(s.observe,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'],r=>r.score>=3?'hot':r.score==2?'warm':'')}
 <h2>回測（5m，三十天內）</h2>
 <div><input id=bs placeholder="AINUSDT" value="AINUSDT" style="width:110px"> <input id=bd type=number value=3 style="width:50px"> 天
-<button onclick="bt()">跑</button></div><div id=btout class=meta></div>
+<button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div><div id=btout class=meta></div>
 <h2>訊號（最新在上）</h2>${T(sig,['time','symbol','engine','side','entry','stop','stop_pct','leverage','notional','executed','reason'],r=>r.side=='LONG'?'long':'short')}
 <h2>錯誤</h2><div class=meta>${s.errors.slice(-10).reverse().join('<br>')||'（無）'}</div>`}
 async function bt(){const o=document.getElementById('btout');o.innerHTML='跑中…';
@@ -71,6 +71,12 @@ const r=await (await fetch('/api/backtest?s='+s+'&d='+d)).json();
 if(r.error){o.innerHTML='錯誤: '+r.error;return}
 o.innerHTML=`${r.symbol} ${r.bars} 根<br>`+T(r.summary,['engine','n','win','exp','pf','best','worst'])+'<br>'+
 T(r.trades.slice().reverse(),['time','engine','side','entry','exit','r','reason','bars'],x=>x.r>0?'long':'short')}
+async function dg(){const o=document.getElementById('btout');o.innerHTML='診斷中…';
+const s=document.getElementById('bs').value,d=document.getElementById('bd').value;
+const r=await (await fetch('/api/diag?s='+s+'&d='+d)).json();
+if(r.error){o.innerHTML='錯誤: '+r.error;return}
+const c=r.counts;o.innerHTML=`${r.symbol} ${c.bars} 根 · 各條件成立次數：hot ${c.hot} · div ${c.div} · pivot ${c.pivot} · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>跌破中樞的棒（最近 40 根，UTC）：<br>`+
+T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','div','pivot','fire'],x=>x.fire=='✅'?'long':'')}
 load();setInterval(load,60000);</script>"""
 
 class H(BaseHTTPRequestHandler):
@@ -80,6 +86,11 @@ class H(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/backtest"):
             q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}
             try: res = backtest.run(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
+            except Exception as e: res = dict(error=str(e))
+            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/diag"):
+            q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}
+            try: res = backtest.diag_a(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/why"):

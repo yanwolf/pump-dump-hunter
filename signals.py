@@ -29,30 +29,33 @@ def macd_hist(closes):
     return line[-1] - sig if sig is not None else None
 
 # ---------- A：崩前，頂背馳 + 中樞跌破 ----------
-def engine_a(k, i):
+def engine_a_flags(k, i):
+    """回傳各條件旗標，診斷用；engine_a 只在全部成立時給 Signal。"""
     P = C.ENGINE_A
-    if i < 60: return None
+    f = dict(hot=False, div=False, pivot=False, brk=False, zd=None, zg=None, width=None)
+    if i < 60: return f
     win = k[:i + 1]
     closes = [x["c"] for x in win]
-    ma20 = sma(closes, 20)
-    # 條件1：最近 lookback 內曾經嚴重偏離 MA20（拋物線）
-    hot = any(win[j]["c"] / sma(closes[:j + 1], 20) - 1 >= P["ma20_dev"]
-              for j in range(i - P["lookback"], i) if j >= 20)
-    if not hot: return None
-    # 條件2：頂背馳代理——lookback 內創新高，但 MACD 柱比前高時弱
-    hi_idx = max(range(i - P["lookback"], i + 1), key=lambda j: win[j]["h"])
-    prev_hi_idx = max(range(i - 2 * P["lookback"], i - P["lookback"]), key=lambda j: win[j]["h"]) if i >= 2 * P["lookback"] else None
-    if prev_hi_idx is None: return None
-    h_now, h_prev = macd_hist(closes[:hi_idx + 1]), macd_hist(closes[:prev_hi_idx + 1])
-    if h_now is None or h_prev is None: return None
-    if not (win[hi_idx]["h"] >= win[prev_hi_idx]["h"] and h_now < h_prev): return None
-    # 條件3：中樞 = 最近 pivot_bars 根的重疊區；本根收盤跌破中樞下緣
+    f["hot"] = any(win[j]["c"] / sma(closes[:j + 1], 20) - 1 >= P["ma20_dev"]
+                   for j in range(max(20, i - P["lookback"]), i))
+    if i >= 2 * P["lookback"]:
+        hi_idx = max(range(i - P["lookback"], i + 1), key=lambda j: win[j]["h"])
+        prev_hi_idx = max(range(i - 2 * P["lookback"], i - P["lookback"]), key=lambda j: win[j]["h"])
+        h_now, h_prev = macd_hist(closes[:hi_idx + 1]), macd_hist(closes[:prev_hi_idx + 1])
+        if h_now is not None and h_prev is not None:
+            f["div"] = win[hi_idx]["h"] >= win[prev_hi_idx]["h"] and h_now < h_prev
     seg = win[-P["pivot_bars"] - 1:-1]
     zg, zd = min(x["h"] for x in seg), max(x["l"] for x in seg)
-    if zg <= zd or (zg - zd) / zd < P["min_pivot_width"]: return None
-    bar = win[-1]
-    if bar["c"] < zd and win[-2]["c"] >= zd:
-        return Signal("A", "SHORT", bar["c"], zg, f"頂背馳後跌破中樞 [{zd:.5g},{zg:.5g}]")
+    if zg > zd:
+        f["zd"], f["zg"], f["width"] = zd, zg, round((zg - zd) / zd * 100, 2)
+        f["pivot"] = (zg - zd) / zd >= P["min_pivot_width"]
+        f["brk"] = win[-1]["c"] < zd and win[-2]["c"] >= zd
+    return f
+
+def engine_a(k, i):
+    f = engine_a_flags(k, i)
+    if f["hot"] and f["div"] and f["pivot"] and f["brk"]:
+        return Signal("A", "SHORT", k[i]["c"], f["zg"], f"頂背馳後跌破中樞 [{f['zd']:.5g},{f['zg']:.5g}]")
     return None
 
 # ---------- B：崩後，死貓反彈力竭做空 ----------

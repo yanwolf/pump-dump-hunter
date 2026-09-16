@@ -70,6 +70,23 @@ def run(symbol, days):
     for t in tr: t["time"] = time.strftime("%m-%d %H:%M", time.gmtime(t["t"] / 1000)) + " UTC"
     return dict(symbol=symbol, days=days, bars=len(k), trades=tr, summary=summary(tr))
 
+def diag_a(symbol, days):
+    """引擎 A 診斷：列出所有「跌破中樞」的棒，以及它們被哪個條件擋掉。"""
+    from signals import engine_a_flags
+    end = int(time.time() * 1000); k = B.klines_range(symbol, "5m", end - days * 86400000, end)
+    rows, cnt = [], dict(bars=len(k), hot=0, div=0, pivot=0, brk=0, all=0)
+    for i in range(len(k)):
+        f = engine_a_flags(k, i)
+        for key in ("hot", "div", "pivot", "brk"): cnt[key] += bool(f[key])
+        if f["brk"]:
+            ok = f["hot"] and f["div"] and f["pivot"]
+            cnt["all"] += ok
+            rows.append(dict(time=time.strftime("%m-%d %H:%M", time.gmtime(k[i]["t"] / 1000)),
+                             close=k[i]["c"], zd=f["zd"], zg=f["zg"], width=f["width"],
+                             hot=f["hot"], div=f["div"], pivot=f["pivot"], fire="✅" if ok else
+                             "缺:" + ",".join(x for x in ("hot", "div", "pivot") if not f[x])))
+    return dict(symbol=symbol, counts=cnt, breaks=rows[-40:])
+
 def report(trades):
     if not trades: print("無交易"); return
     by = {}
