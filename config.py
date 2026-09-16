@@ -31,6 +31,7 @@ ENGINE_A = dict(  # 崩前：頂背馳 + 中樞跌破
     near_top=0.85,           # 中樞上緣 >= 24h 高點的 85%，排除拉升途中的回檔
     brk_vol_mult=1.5,        # 跌破棒量 >= 1.5x MAVOL20
     top_age_bars=12,         # 區間高點至少 N 根前做的（0=不檢查）；過濾「還在噴的回檔」
+    entry_min_of_high=0.75,  # 進場價 >= 24h 高點的 75%：只做從頂部下來的第一刀，不追第五段
 )
 ENGINE_B = dict(  # 崩後：死貓反彈做空
     crash_bars=12,           # 12 根 5m = 1h
@@ -62,9 +63,11 @@ ENGINE_E = dict(  # 拉升初期突破回踩跟多（多）
 
 # 各引擎出場覆蓋（沒寫的用 RISK 預設）
 EXIT = dict(
-    A=dict(tp1_r=None, be_r=1.0, trail_after_r=2.0, trail_bars=3, max_hold_bars=144),  # 不減碼：1R 移到成本，放著跑
-    D=dict(max_hold_bars=24, trail_after_r=1.5, trail_bars=3),     # 快進快出，只吃第一段反彈
-    E=dict(max_hold_bars=288, trail_after_r=2.0, trail_bars=12),   # 拿久一點，用 1h 級別高低追蹤
+    A=dict(tp1_r=None, be_r=1.0, trail_after_r=2.0, trail_bars=3, max_hold_bars=144, cooldown_bars=48),  # 不減碼；出場後 4h 冷卻
+    B=dict(cooldown_bars=24),
+    C=dict(cooldown_bars=24),
+    D=dict(max_hold_bars=24, trail_after_r=1.5, trail_bars=3, cooldown_bars=48),
+    E=dict(max_hold_bars=288, trail_after_r=2.0, trail_bars=12, cooldown_bars=288),  # 一天最多一次
 )
 
 # ---- 風控（低勝率高賠率的核心）----
@@ -80,4 +83,19 @@ RISK = dict(
     max_hold_bars=72,        # 最多持有 6 小時
     fee=0.0005,              # 單邊 taker
     slippage=0.003,          # 小幣先抓 0.3%，之後用實測數據覆蓋
+    cooldown_bars=0,         # 同引擎出場後 N 根內不再進（各引擎可在 EXIT 覆蓋）
 )
+
+def apply_overrides(o):
+    """回測/掃描用：以 dict 覆蓋參數，回傳還原用的快照。格式 {"ENGINE_A": {...}, "EXIT": {"A": {...}}, "RISK": {...}}"""
+    import copy
+    snap = {k: copy.deepcopy(globals()[k]) for k in ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "EXIT", "RISK")}
+    for k, v in (o or {}).items():
+        if k not in snap or not isinstance(v, dict): continue
+        if k == "EXIT":
+            for e, ev in v.items(): globals()[k].setdefault(e, {}).update(ev)
+        else: globals()[k].update(v)
+    return snap
+
+def restore(snap):
+    for k, v in snap.items(): globals()[k].clear(); globals()[k].update(v)

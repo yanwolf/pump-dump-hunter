@@ -59,7 +59,10 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 <button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div>
 <div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
 <h2>歷史事件掃描（全市場，3 天漲一倍後跌四成）</h2>
-<div><input id=sd type=number value=30 style="width:50px"> 天 <button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button></div>
+<div><input id=sd type=number value=30 style="width:50px"> 天 <input id=sl placeholder="這次的標籤（可空）" style="width:140px">
+<button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button> <button onclick="swtoggle()">收合/展開</button> <button onclick="swclear()">清除</button></div>
+<div class=meta>覆蓋參數（JSON，可空＝用預設；K 線有快取，換參數重跑只要幾秒）：</div>
+<textarea id=so rows=3 style="width:100%;max-width:600px;background:#222;color:#ddd;border:1px solid #444;border-radius:6px;font-size:12px"></textarea>
 <div id=swout class=meta>（尚未執行）</div>
 <div id=live></div>
 <script>
@@ -87,10 +90,15 @@ const r=await (await fetch('/api/diag?s='+s+'&d='+d)).json();
 if(r.error){o.innerHTML='錯誤: '+r.error;return}
 const c=r.counts;o.innerHTML=`${r.symbol} ${c.bars} 根 · 成立次數：hot ${c.hot} · pivot ${c.pivot} · top ${c.top} · vol ${c.vol} · (div ${c.div}，參考) · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>跌破中樞的棒（最近 40 根，UTC）：<br>`+
 T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','pivot','top','vol','div','fire'],x=>x.fire=='✅'?'long':'')}
-async function sw(){await fetch('/api/sweep/start?d='+document.getElementById('sd').value);setTimeout(swload,1500)}
+let swOpen=true;function swtoggle(){swOpen=!swOpen;swload()}
+async function swclear(){if(!confirm('清除掃描結果？（K 線快取保留）'))return;await fetch('/api/sweep/clear');swload()}
+async function sw(){const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&l='+encodeURIComponent(document.getElementById('sl').value)+'&o='+encodeURIComponent(document.getElementById('so').value))).json();
+if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
 async function swload(){const o=document.getElementById('swout');const r=await (await fetch('/api/sweep')).json();
-if(!r.status){o.innerHTML='（尚未執行）';return}
+if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','time','n','total','A','B','C','D','E']):'');return}
 let h='<b>'+r.status+'</b>';
+if(r.runs&&r.runs.length)h+='<br>歷次比較（total=全部 R 合計）：'+T(r.runs,['label','time','n','total','A','B','C','D','E'],x=>x.total>0?'long':'');
+if(!swOpen){o.innerHTML=h+'<br>（已收合）';return}
 if(r.summary&&r.summary.length)h+='<br>各引擎彙整：'+T(r.summary,['engine','n','win','exp','pf','best','worst']);
 if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的合計 R）：'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E'],x=>['R_A','R_B','R_C','R_D','R_E'].some(k=>x[k]>0)?'long':'');
 else if(r.events&&r.events.length)h+='<br>事件：'+T(r.events,['symbol','peak_day','pump','dump']);
@@ -107,10 +115,16 @@ class H(BaseHTTPRequestHandler):
             try: res = backtest.run(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/sweep/clear"):
+            sweep.clear(); body, ct = b'{"ok":true}', "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep/start"):
-            d = int(self.path.split("d=")[-1]) if "d=" in self.path else 30
-            ok = sweep.start(min(d, 30))
-            body, ct = json.dumps(dict(started=ok)).encode(), "application/json; charset=utf-8"
+            import urllib.parse
+            q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
+            d = int(q.get("d", ["30"])[0]); ov = None; err = None
+            try: ov = json.loads(q["o"][0]) if q.get("o") and q["o"][0].strip() else None
+            except Exception as e: err = f"覆蓋參數不是合法 JSON: {e}"
+            ok = False if err else sweep.start(min(d, 30), ov, q.get("l", [""])[0])
+            body, ct = json.dumps(dict(started=ok, error=err), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep"):
             body, ct = json.dumps(store.get().get("sweep", {}), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/diag"):

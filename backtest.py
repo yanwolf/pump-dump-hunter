@@ -4,7 +4,7 @@ import binance as B, config as C, risk
 from signals import ENGINES
 
 def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
-    trades, open_ = [], None
+    trades, open_, last_exit = [], None, {}
     for i in range(len(k)):
         bar = k[i]
         if open_:
@@ -33,9 +33,12 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
             r_total -= (R["fee"] * 2 + R["slippage"]) * t["entry"] / t["r_unit"]
             trades.append(dict(engine=t["engine"], side=t["side"], t=t["t"], entry=t["entry"], exit=exit_px,
                                r=round(r_total, 2), reason=reason, bars=i - t["i"]))
+            last_exit[t["engine"]] = i
             open_ = None
             continue
         for eid in engine_ids:
+            cd = {**C.RISK, **C.EXIT.get(eid, {})}["cooldown_bars"]
+            if eid in last_exit and i - last_exit[eid] < cd: continue
             sig = ENGINES[eid](k, i)
             if sig and sig.risk <= C.RISK["max_stop_pct"]:
                 d = 1 if sig.side == "LONG" else -1
@@ -77,8 +80,8 @@ def diag_a(symbol, days):
     """引擎 A 診斷：列出所有「跌破中樞」的棒，以及它們被哪個條件擋掉。"""
     from signals import engine_a_flags
     end = int(time.time() * 1000); k = B.klines_range(symbol, "5m", end - days * 86400000, end)
-    need = ("hot", "pivot", "top", "vol")
-    rows, cnt = [], dict(bars=len(k), hot=0, pivot=0, top=0, vol=0, div=0, brk=0, all=0)
+    need = ("hot", "pivot", "top", "vol", "first")
+    rows, cnt = [], dict(bars=len(k), hot=0, pivot=0, top=0, vol=0, first=0, div=0, brk=0, all=0)
     for i in range(len(k)):
         f = engine_a_flags(k, i)
         for key in need + ("div", "brk"): cnt[key] += bool(f[key])
@@ -87,7 +90,7 @@ def diag_a(symbol, days):
             cnt["all"] += ok
             rows.append(dict(time=time.strftime("%m-%d %H:%M", time.gmtime(k[i]["t"] / 1000)),
                              close=k[i]["c"], zd=f["zd"], zg=f["zg"], width=f["width"],
-                             hot=f["hot"], pivot=f["pivot"], top=f["top"], vol=f["vol"], div=f["div"],
+                             hot=f["hot"], pivot=f["pivot"], top=f["top"], vol=f["vol"], first=f["first"], div=f["div"],
                              fire="✅" if ok else "缺:" + ",".join(x for x in need if not f[x])))
     return dict(symbol=symbol, counts=cnt, breaks=rows[-40:])
 

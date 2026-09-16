@@ -10,6 +10,8 @@ EVENT = dict(
     min_quote_vol=1e6,
 )
 _running = False
+_kcache = {}      # symbol -> (days, k)  K 線快取，換參數重跑不用再抓
+_events = {}      # days -> events
 
 def find_events(days):
     syms = B.perp_symbols(); tick = B.ticker_24h()
@@ -40,19 +42,27 @@ def find_events(days):
         time.sleep(0.08)
     return events
 
-def run(days=30):
+def run(days=30, overrides=None, label=""):
     global _running
     if _running: return
     _running = True
+    snap = None
     try:
-        store.update(sweep=dict(status="掃描中…", events=[], results=[], summary=[]))
-        events = find_events(days)
+        prev = store.get().get("sweep", {}) or {}
+        runs = prev.get("runs", [])
+        store.update(sweep=dict(status="掃描中…", events=[], results=[], summary=[], runs=runs))
+        if days in _events: events = _events[days]
+        else: events = find_events(days); _events[days] = events
+        snap = C.apply_overrides(overrides)
         results, allt = [], []
         end = int(time.time() * 1000)
         for i, ev in enumerate(events):
-            store.update(sweep=dict(status=f"回測 {i + 1}/{len(events)} {ev['symbol']}", events=events, results=results))
+            store.update(sweep=dict(status=f"回測 {i + 1}/{len(events)} {ev['symbol']}", events=events, results=results, runs=runs))
             try:
-                k = B.klines_range(ev["symbol"], "5m", end - days * 86400000, end)
+                cached = _kcache.get(ev["symbol"])
+                if cached and cached[0] == days: k = cached[1]
+                else:
+                    k = B.klines_range(ev["symbol"], "5m", end - days * 86400000, end); _kcache[ev["symbol"]] = (days, k)
                 tr = backtest.simulate_each(k)
                 for t in tr: t["symbol"] = ev["symbol"]; t["time"] = time.strftime("%m-%d %H:%M", time.gmtime(t["t"] / 1000))
                 allt += tr
@@ -61,15 +71,30 @@ def run(days=30):
                 results.append(dict(**ev, bars=len(k), trades=len(tr), **{f"R_{e}": by.get(e) for e in "ABCDE"}))
             except Exception as e:
                 results.append(dict(**ev, error=str(e)))
-        store.update(sweep=dict(status=f"完成：{len(events)} 個事件，{len(allt)} 筆交易，{time.strftime('%m-%d %H:%M')}",
-                                events=events, results=results, summary=backtest.summary(allt),
+        summ = backtest.summary(allt)
+        runs = (runs + [dict(label=label or (json_short(overrides) if overrides else "預設"), time=time.strftime("%m-%d %H:%M"),
+                             n=len(allt), total=round(sum(t["r"] for t in allt), 1),
+                             **{f"{x['engine']}": f"{x['n']}筆 PF{x['pf']} {x['exp']:+}" for x in summ})])[-12:]
+        store.update(sweep=dict(status=f"完成：{len(events)} 個事件，{len(allt)} 筆交易，{time.strftime('%m-%d %H:%M')}" + (f"（{label}）" if label else ""),
+                                events=events, results=results, summary=summ, runs=runs,
                                 trades=sorted(allt, key=lambda t: -abs(t["r"]))[:60]))
     except Exception as e:
         store.update(sweep=dict(status=f"失敗: {e}")); traceback.print_exc()
     finally:
+        if snap: C.restore(snap)
         _running = False
 
-def start(days=30):
+def json_short(o):
+    import json
+    s = json.dumps(o, ensure_ascii=False, separators=(",", ":"))
+    return s if len(s) < 60 else s[:57] + "…"
+
+def clear():
+    store.update(sweep={})
+_kcache = {}      # symbol -> (days, k)  K 線快取，換參數重跑不用再抓
+_events = {}      # days -> events
+
+def start(days=30, overrides=None, label=""):
     if _running: return False
-    threading.Thread(target=run, args=(days,), daemon=True).start()
+    threading.Thread(target=run, args=(days, overrides, label), daemon=True).start()
     return True
