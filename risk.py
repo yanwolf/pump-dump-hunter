@@ -3,7 +3,7 @@ import math
 import config as C
 
 def size(sig, equity=None):
-    R = C.RISK
+    R = {**C.RISK, **C.EXIT.get(sig.engine, {})}     # 每引擎可覆蓋 risk_pct / 止損上下限
     equity = equity or R["equity"]
     risk_usdt = equity * R["risk_pct"]
     dist = abs(sig.entry - sig.stop)

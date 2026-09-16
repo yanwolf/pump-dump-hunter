@@ -4,7 +4,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params
 from signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
-ENABLED = set(os.environ.get("ENGINES", "B,C").split(","))
+ENABLED = set(os.environ.get("ENGINES", "B,C,F").split(","))
 TRADE = os.environ.get("TRADE", "0") == "1"          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
 SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 

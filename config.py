@@ -71,14 +71,15 @@ ENGINE_F = dict(  # 崩盤進行中順勢追空（1m K 線）：抓清算連鎖�
 )
 
 # 各引擎出場覆蓋（沒寫的用 RISK 預設）
+# 各引擎出場/風險覆蓋（risk_pct = 每筆風險佔本金；2026-09-16 崩盤日回測：C PF5.7 主力，B/F PF~1.1-1.3 收數據用）
 EXIT = dict(
     A=dict(tp1_r=None, be_r=1.0, trail_after_r=2.0, trail_bars=3, max_hold_bars=144, cooldown_bars=48),  # 不減碼；出場後 4h 冷卻
-    B=dict(cooldown_bars=24),
-    C=dict(cooldown_bars=24),
+    B=dict(cooldown_bars=24, risk_pct=0.01),
+    C=dict(cooldown_bars=24, risk_pct=0.02),
     D=dict(max_hold_bars=24, trail_after_r=1.5, trail_bars=3, cooldown_bars=48),
     E=dict(max_hold_bars=288, trail_after_r=2.0, trail_bars=12, cooldown_bars=288),  # 一天最多一次
     F=dict(tp1_r=None, be_r=1.0, trail_after_r=1.5, trail_bars=3, max_hold_bars=60, cooldown_bars=30,
-           min_stop_pct=0.03),   # 1m 引擎：不減碼、1R 保本、1.5R 起 3 根高點追蹤、最多 60 分鐘
+           min_stop_pct=0.03, risk_pct=0.01),   # 1m 引擎：不減碼、1R 保本、1.5R 起 3 根高點追蹤、最多 60 分鐘
 )
 
 # ---- 風控（低勝率高賠率的核心）----

@@ -59,6 +59,9 @@ SCHEMA = [
        help="超過就平倉（60）。這是搶崩盤那一小時的引擎，不該抱久"),
   dict(g="F 崩盤進行中追空（1m，清算連鎖）", k="EXIT.F.trail_bars", label="追蹤根數", unit="根1m", step=1,
        help="1.5R 後用最近幾根 1m 高點追蹤（3）"),
+  dict(g="每引擎風險（每筆賠本金幾 %）", k="EXIT.B.risk_pct", label="B 每筆風險", unit="", step=0.005, help="0.01 = 1%。B 三次回測 PF 1.1–1.2，收數據用"),
+  dict(g="每引擎風險（每筆賠本金幾 %）", k="EXIT.C.risk_pct", label="C 每筆風險", unit="", step=0.005, help="0.02 = 2%。C 崩盤日模式 PF 5.7，主力"),
+  dict(g="每引擎風險（每筆賠本金幾 %）", k="EXIT.F.risk_pct", label="F 每筆風險", unit="", step=0.005, help="0.01 = 1%。F 崩盤日模式 PF 1.32，邊際薄"),
   # ---- 出場/風控 ----
   dict(g="出場與風控（全部引擎）", k="RISK.tp1_r",   label="1R 出一半", unit="R", step=0.5,
        help="到幾 R 先出一半並移止損到成本（1）。A 引擎固定不減碼，不受此影響"),
