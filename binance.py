@@ -61,6 +61,12 @@ def klines_range(symbol, interval, start_ms, end_ms):
         time.sleep(0.2)
     return out
 
+def wallet_balance(asset="USDT"):
+    """錢包餘額（含未實現前的保證金），不是可用餘額。"""
+    for x in _get("/fapi/v2/balance", signed=True):
+        if x["asset"] == asset: return float(x["balance"])
+    return 0.0
+
 # ---- 下單（testnet / live 由 USE_TESTNET 決定）----
 def position_mode_hedge():
     return _get("/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"]
