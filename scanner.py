@@ -13,13 +13,13 @@ def scan(verbose=True):
     cands, crashed_rows = [], []
     for s in B.perp_symbols():
         t = tick.get(s)
-        if not t: continue
+        if not t or s[:-4] in P["exclude"]: continue        # 主流幣不看
         qv, chg = float(t["quoteVolume"]), float(t["priceChangePercent"])
         if qv < P["min_quote_vol_24h"]: continue
-        if chg <= P["crashed_drop"]:                 # 崩盤幣不受成交額上限限制
+        if chg <= P["crashed_drop"]:
             crashed_rows.append((chg, s, qv)); continue
-        if qv <= P["max_quote_vol_24h"]:
-            cands.append((chg, s, qv))
+        if P["max_quote_vol_24h"] and qv > P["max_quote_vol_24h"]: continue
+        cands.append((chg, s, qv))
     cands.sort(reverse=True)
     crashed = {c[1] for c in crashed_rows}
     cands = cands[:P["top_n"]] + crashed_rows
@@ -39,12 +39,12 @@ def scan(verbose=True):
                                 gain48=round(gain48 * 100, 1), ma20_dev=round(dev * 100, 1),
                                 oi_growth=round(oi_g * 100, 1), funding=round(f * 100, 4),
                                 vol24=round(qv / 1e6, 1),
-                                hits=("💥" if s in crashed else "") + "".join(k[0] for k, v in hits.items() if v)))
+                                hits=("💥" if s in crashed else "🔥" if chg24 >= P["watch_chg24"] else "") + "".join(k[0] for k, v in hits.items() if v)))
             time.sleep(0.15)
         except Exception as e:
             if verbose: print(s, "skip:", e)
     observe.sort(key=lambda r: (-r["score"], -r["ma20_dev"]))
-    watch = [r for r in observe if r["score"] >= P["min_score"] or r["symbol"] in crashed]
+    watch = [r for r in observe if r["score"] >= P["min_score"] or r["symbol"] in crashed or r["chg24"] >= P["watch_chg24"]]
     return watch, observe
 
 def why(symbol):
@@ -60,7 +60,7 @@ def why(symbol):
     if info["status"] != "TRADING": out["reason"] = f"status={info['status']}，perp_symbols() 只收 TRADING"
     elif qv < P["min_quote_vol_24h"]: out["reason"] = "成交額低於下限"
     elif chg <= P["crashed_drop"]: out["reason"] = "應在崩盤名單（若沒有，重掃一次）"
-    elif qv > P["max_quote_vol_24h"]: out["reason"] = "成交額超過上限，被當大幣排除"
+    elif symbol[:-4] in P["exclude"]: out["reason"] = "在主流幣排除清單"
     else: out["reason"] = "在候選內，但 24h 漲幅沒進前 N"
     return out
 

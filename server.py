@@ -86,7 +86,7 @@ document.getElementById('head').innerHTML=`<b>pump-dump-hunter</b>
 document.getElementById('live').innerHTML=`
 <h2>擁擠名單（引擎正在盯）</h2>${T(s.watch,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'])}
 <h2>訊號（最新在上） <button onclick="sigclear()" style="font-size:12px;padding:3px 8px">清除訊號紀錄</button></h2>${T(sig,['time','symbol','engine','side','entry','stop','stop_pct','equity','usable','margin','notional','executed','skipped','reason'],r=>r.side=='LONG'?'long':'short')}
-<h2>觀察名單（24h 漲幅前 40，依熱度排）</h2><div class=meta>score = g/d/o/f 四項各 1 分，≥3 進擁擠名單 · hits: g=48h漲幅 d=偏離MA20 o=OI增幅 f=資金費率 💥=24h跌超30%（崩後引擎盯） · 百分比單位</div>
+<h2>觀察名單（24h 漲幅前 60，依熱度排；主流幣已排除）</h2><div class=meta>score = g/d/o/f 四項各 1 分，≥3 進擁擠名單 · hits: g=48h漲幅 d=偏離MA20 o=OI增幅 f=資金費率 💥=24h跌超30% 🔥=24h漲超40%（兩者都直接進引擎監控） · 百分比單位</div>
 ${T(s.observe,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'],r=>r.score>=3?'hot':r.score==2?'warm':'')}
 <h2>錯誤</h2><div class=meta>${s.errors.slice(-10).reverse().join('<br>')||'（無）'}</div>`}
 async function bt(){const o=document.getElementById('btout');o.innerHTML='跑中…';

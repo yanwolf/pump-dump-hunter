@@ -9,7 +9,10 @@ API_SECRET = os.environ.get("BINANCE_SECRET", "")
 
 # ---- 掃描層：多頭擁擠名單 ----
 SCAN = dict(
-    top_n=40,                # 先取 24h 漲幅前 N 檔算細項（觀察名單）
+    top_n=60,                # 先取 24h 漲幅前 N 檔算細項（觀察名單）
+    watch_chg24=40.0,        # 24h 漲幅 >= 40% 的一律進引擎監控（崩後引擎只在崩時開槍，多盯不多訊號）
+    exclude=("BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK", "DOT", "LTC", "BCH",
+             "TON", "SUI", "XLM", "HBAR", "SHIB", "NEAR", "APT", "ARB", "OP", "UNI", "AAVE", "ATOM", "ETC", "FIL"),
     min_gain_48h=0.5,        # 48h 漲幅 >= 50%
     min_funding=0.0003,      # 資金費率 >= 0.03% / 8h（0.01% 是常態）
     min_oi_growth_24h=0.3,   # OI 24h 增幅 >= 30%
@@ -17,7 +20,7 @@ SCAN = dict(
     min_score=3,             # 四項中 >= 3 項才進「擁擠名單」
     crashed_drop=-30.0,      # 24h 跌幅 <= -30% 的也直接進名單（崩後引擎 B/C/D 要盯）
     min_quote_vol_24h=3e6,   # 24h 成交額 >= 300 萬 USDT（太薄的不碰）
-    max_quote_vol_24h=3e8,   # 太大的不是小幣
+    max_quote_vol_24h=None,  # 不再用成交額判大小幣：LSK 市值 2 億但瘋起來成交額 14 億，會被誤踢；改用 exclude 清單
 )
 
 # ---- 進場層 ----
