@@ -76,6 +76,7 @@ RISK = dict(
     risk_pct=0.02,           # 每筆最多賠本金 2%
     max_leverage=20,
     max_stop_pct=0.25,       # 止損距離 > 25% 的訊號一律不進（賠率已經壞掉）
+    min_stop_pct=0.05,       # 止損距離 < 5% 的訊號也不進：手續費+滑價會吃掉 R 的兩成以上
     tp1_r=1.0,               # 1R 出一半、止損移到成本（None = 不減碼）
     be_r=None,               # 不減碼時，到幾 R 把止損移到成本
     trail_after_r=2.0,       # 2R 後用最近 3 根高點追蹤

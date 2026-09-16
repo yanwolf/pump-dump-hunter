@@ -40,7 +40,7 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
             cd = {**C.RISK, **C.EXIT.get(eid, {})}["cooldown_bars"]
             if eid in last_exit and i - last_exit[eid] < cd: continue
             sig = ENGINES[eid](k, i)
-            if sig and sig.risk <= C.RISK["max_stop_pct"]:
+            if sig and C.RISK["min_stop_pct"] <= sig.risk <= C.RISK["max_stop_pct"]:
                 d = 1 if sig.side == "LONG" else -1
                 open_ = dict(engine=eid, side=sig.side, dir=d, i=i, t=bar["t"], entry=sig.entry, stop=sig.stop,
                              r_unit=abs(sig.stop - sig.entry), tp1=False, be=False, half_pnl=0,

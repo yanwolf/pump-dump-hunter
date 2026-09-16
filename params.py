@@ -10,6 +10,8 @@ SCHEMA = [
        help="24h 內從低到高至少漲幾倍才算拉過頭（0.4=40%）。調大：只做瘋狂的，訊號少"),
   dict(g="A 崩前（頂部中樞跌破做空）", k="ENGINE_A.entry_min_of_high", label="第一刀門檻", unit="×24h高", step=0.05,
        help="進場價要在 24h 高點的幾成以上（0.75）。調大：只做剛從頂部掉下來那一刀；調小：跌一段了還會進（容易追第 N 段）"),
+  dict(g="A 崩前（頂部中樞跌破做空）", k="ENGINE_A.min_pivot_width", label="中樞最小寬度", unit="", step=0.01,
+       help="頂部區間高低差至少幾 %（0.03）才算有效中樞。調大：只做寬區間的跌破，止損距離自然變寬"),
   dict(g="A 崩前（頂部中樞跌破做空）", k="ENGINE_A.brk_vol_mult", label="跌破放量", unit="×MAVOL", step=0.5,
        help="跌破那根的量要是均量幾倍。調大：要真的放量才進，訊號少但假跌破少"),
   dict(g="A 崩前（頂部中樞跌破做空）", k="ENGINE_A.top_age_bars", label="頂部至少幾根前", unit="根5m", step=6,
@@ -55,6 +57,8 @@ SCHEMA = [
        help="超過就平倉（72=6小時）"),
   dict(g="出場與風控（全部引擎）", k="RISK.max_stop_pct", label="止損上限", unit="", step=0.05,
        help="止損距離超過幾 %（0.25）的訊號不做"),
+  dict(g="出場與風控（全部引擎）", k="RISK.min_stop_pct", label="止損下限", unit="", step=0.01,
+       help="止損距離不到幾 %（0.05）的訊號不做：太窄的止損，手續費+滑價就吃掉 R 的兩成。設 0 = 不限制"),
   dict(g="出場與風控（全部引擎）", k="RISK.slippage", label="滑價假設", unit="", step=0.001,
        help="每邊滑價（0.003=0.3%）。調大＝更保守，看策略撐不撐得住"),
 ]
