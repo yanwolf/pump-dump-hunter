@@ -67,6 +67,10 @@ def wallet_balance(asset="USDT"):
         if x["asset"] == asset: return float(x["balance"])
     return 0.0
 
+def open_positions():
+    """目前未平倉的 (symbol, positionSide) 數。"""
+    return [p for p in _get("/fapi/v2/positionRisk", signed=True) if abs(float(p["positionAmt"])) > 0]
+
 # ---- 下單（testnet / live 由 USE_TESTNET 決定）----
 def position_mode_hedge():
     return _get("/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"]

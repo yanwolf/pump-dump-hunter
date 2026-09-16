@@ -24,17 +24,19 @@ def equity_now():
     return ladder(_bal["balance"]), _bal["balance"]
 
 def size(sig, equity=None):
+    """回傳倉位；equity 給的是階梯本金（未扣保留）。"""
     R = {**C.RISK, **C.EXIT.get(sig.engine, {})}     # 每引擎可覆蓋 risk_pct / 止損上下限
+    S = C.SIZING
     if equity is None: equity, _ = equity_now()
-    risk_usdt = equity * R["risk_pct"]
+    usable = equity * (1 - S["reserve_pct"])          # 扣掉保留後真正拿來算的本金
     dist = abs(sig.entry - sig.stop)
     if dist <= 0 or not (R["min_stop_pct"] <= dist / sig.entry <= R["max_stop_pct"]): return None   # 止損太遠或太近：不進
+    risk_usdt = usable * R["risk_pct"]
     qty = risk_usdt / dist
     notional = qty * sig.entry
-    lev = math.ceil(notional / equity)
-    if lev > R["max_leverage"]:            # 止損太遠 → 縮部位，不是放大槓桿
-        lev = R["max_leverage"]
-        notional = equity * lev
-        qty = notional / sig.entry
-    return dict(qty=qty, notional=round(notional, 2), leverage=lev, equity=equity,
-                risk_usdt=round(qty * dist, 2), stop_pct=round(sig.risk * 100, 2))
+    lev = S["leverage"]
+    margin_cap = usable / S["max_positions"]          # 三筆全開也只用掉 usable
+    if notional / lev > margin_cap:                   # 止損太窄 → 名目太大：縮倉位，不加槓桿
+        notional = margin_cap * lev; qty = notional / sig.entry
+    return dict(qty=qty, notional=round(notional, 2), leverage=lev, margin=round(notional / lev, 2), equity=equity,
+                usable=round(usable, 2), risk_usdt=round(qty * dist, 2), stop_pct=round(sig.risk * 100, 2))
