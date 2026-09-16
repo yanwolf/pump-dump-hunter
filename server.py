@@ -1,7 +1,7 @@
 """Zeabur 入口：HTTP 狀態頁 + 背景 paper/live 迴圈。"""
 import json, os, threading, time, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import binance as B, config as C, risk, scanner, store, telegram, backtest
+import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep
 from signals import ENGINES, LONG_ENGINES
 
 ENABLED = set(os.environ.get("ENGINES", "A,B,C,D,E").split(","))
@@ -58,6 +58,9 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 <div><input id=bs placeholder="AINUSDT" value="AINUSDT" style="width:110px"> <input id=bd type=number value=3 style="width:50px"> 天
 <button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div>
 <div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
+<h2>歷史事件掃描（全市場，3 天漲一倍後跌四成）</h2>
+<div><input id=sd type=number value=30 style="width:50px"> 天 <button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button></div>
+<div id=swout class=meta>（尚未執行）</div>
 <div id=live></div>
 <script>
 const T=(rows,cols,cls)=>rows.length?'<div class=wrap><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
@@ -84,7 +87,16 @@ const r=await (await fetch('/api/diag?s='+s+'&d='+d)).json();
 if(r.error){o.innerHTML='錯誤: '+r.error;return}
 const c=r.counts;o.innerHTML=`${r.symbol} ${c.bars} 根 · 成立次數：hot ${c.hot} · pivot ${c.pivot} · top ${c.top} · vol ${c.vol} · (div ${c.div}，參考) · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>跌破中樞的棒（最近 40 根，UTC）：<br>`+
 T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','pivot','top','vol','div','fire'],x=>x.fire=='✅'?'long':'')}
-load();setInterval(load,60000);</script>"""
+async function sw(){await fetch('/api/sweep/start?d='+document.getElementById('sd').value);setTimeout(swload,1500)}
+async function swload(){const o=document.getElementById('swout');const r=await (await fetch('/api/sweep')).json();
+if(!r.status){o.innerHTML='（尚未執行）';return}
+let h='<b>'+r.status+'</b>';
+if(r.summary&&r.summary.length)h+='<br>各引擎彙整：'+T(r.summary,['engine','n','win','exp','pf','best','worst']);
+if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的合計 R）：'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E'],x=>['R_A','R_B','R_C','R_D','R_E'].some(k=>x[k]>0)?'long':'');
+else if(r.events&&r.events.length)h+='<br>事件：'+T(r.events,['symbol','peak_day','pump','dump']);
+if(r.trades&&r.trades.length)h+='<br>最大單筆（|R| 前 60）：'+T(r.trades,['symbol','time','engine','side','entry','exit','r','reason'],x=>x.r>0?'long':'short');
+o.innerHTML=h;if(r.status&&!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}
+load();swload();setInterval(load,60000);</script>"""
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -95,6 +107,12 @@ class H(BaseHTTPRequestHandler):
             try: res = backtest.run(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/sweep/start"):
+            d = int(self.path.split("d=")[-1]) if "d=" in self.path else 30
+            ok = sweep.start(min(d, 30))
+            body, ct = json.dumps(dict(started=ok)).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/sweep"):
+            body, ct = json.dumps(store.get().get("sweep", {}), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/diag"):
             q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}
             try: res = backtest.diag_a(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))

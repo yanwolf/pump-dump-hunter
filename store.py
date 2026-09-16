@@ -2,7 +2,7 @@
 import json, os, threading
 DATA_DIR = os.environ.get("DATA_DIR", "./data"); os.makedirs(DATA_DIR, exist_ok=True)
 _lock = threading.Lock()
-_state = dict(watch=[], observe=[], signals=[], trades=[], last_scan=None, started=None, errors=[])
+_state = dict(watch=[], observe=[], signals=[], sweep={}, trades=[], last_scan=None, started=None, errors=[])
 _path = os.path.join(DATA_DIR, "state.json")
 if os.path.exists(_path):
     try: _state.update(json.load(open(_path)))
