@@ -15,6 +15,7 @@ SCAN = dict(
     min_oi_growth_24h=0.3,   # OI 24h 增幅 >= 30%
     min_ma20_dev=0.25,       # 價格偏離 1h MA20 >= 25%
     min_score=3,             # 四項中 >= 3 項才進「擁擠名單」
+    crashed_drop=-30.0,      # 24h 跌幅 <= -30% 的也直接進名單（崩後引擎 B/C/D 要盯）
     min_quote_vol_24h=3e6,   # 24h 成交額 >= 300 萬 USDT（太薄的不碰）
     max_quote_vol_24h=3e8,   # 太大的不是小幣
 )

@@ -17,7 +17,9 @@ def scan(verbose=True):
         qv = float(t["quoteVolume"])
         if P["min_quote_vol_24h"] <= qv <= P["max_quote_vol_24h"]:
             cands.append((float(t["priceChangePercent"]), s, qv))
-    cands.sort(reverse=True); cands = cands[:P["top_n"]]
+    cands.sort(reverse=True)
+    crashed = {c[1] for c in cands if c[0] <= P["crashed_drop"]}
+    cands = cands[:P["top_n"]] + [c for c in cands if c[1] in crashed]
     if verbose: print(f"候選 {len(cands)} 檔")
     observe = []
     for chg24, s, qv in cands:
@@ -33,12 +35,13 @@ def scan(verbose=True):
             observe.append(dict(symbol=s, score=sum(hits.values()), chg24=round(chg24, 1),
                                 gain48=round(gain48 * 100, 1), ma20_dev=round(dev * 100, 1),
                                 oi_growth=round(oi_g * 100, 1), funding=round(f * 100, 4),
-                                vol24=round(qv / 1e6, 1), hits="".join(k[0] for k, v in hits.items() if v)))
+                                vol24=round(qv / 1e6, 1),
+                                hits=("💥" if s in crashed else "") + "".join(k[0] for k, v in hits.items() if v)))
             time.sleep(0.15)
         except Exception as e:
             if verbose: print(s, "skip:", e)
     observe.sort(key=lambda r: (-r["score"], -r["ma20_dev"]))
-    watch = [r for r in observe if r["score"] >= P["min_score"]]
+    watch = [r for r in observe if r["score"] >= P["min_score"] or r["symbol"] in crashed]
     return watch, observe
 
 if __name__ == "__main__":
