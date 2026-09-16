@@ -4,7 +4,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params
 from signals import ENGINES, LONG_ENGINES
 
-ENABLED = set(os.environ.get("ENGINES", "A,B,C,D,E").split(","))
+ENABLED = set(os.environ.get("ENGINES", "B,C").split(","))
 TRADE = os.environ.get("TRADE", "0") == "1"          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
 SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 
@@ -58,7 +58,7 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 <div><input id=bs placeholder="AINUSDT" value="AINUSDT" style="width:110px"> <input id=bd type=number value=3 style="width:50px"> 天
 <button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div>
 <div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
-<h2>歷史事件掃描（全市場，3 天漲一倍後跌四成）</h2>
+<h2>歷史事件掃描（全市場，3 天漲一倍後跌四成，最多 90 天）</h2>
 <div><input id=sd type=number value=30 style="width:50px"> 天 <input id=sl placeholder="這次的標籤（可空）" style="width:140px">
 <button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button> <button onclick="swtoggle()">收合/展開</button> <button onclick="swclear()">清除</button></div>
 <div class=meta style="margin-top:6px">調參：改哪個就填哪個，沒動的用預設（括號內）。<button onclick="pform(true)">全部還原</button> <button onclick="ptoggle()">顯示/隱藏參數</button></div>
@@ -135,7 +135,7 @@ class H(BaseHTTPRequestHandler):
                 raw = json.loads(q["o"][0]) if q.get("o") and q["o"][0].strip() else None
                 ov = params.to_overrides(raw) if raw and not any(x in raw for x in ("ENGINE_A", "RISK", "EXIT")) else raw
             except Exception as e: err = f"參數格式錯誤: {e}"
-            ok = False if err else sweep.start(min(d, 30), ov, q.get("l", [""])[0])
+            ok = False if err else sweep.start(min(d, 90), ov, q.get("l", [""])[0])
             body, ct = json.dumps(dict(started=ok, error=err), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep"):
             body, ct = json.dumps(store.get().get("sweep", {}), ensure_ascii=False).encode(), "application/json; charset=utf-8"
