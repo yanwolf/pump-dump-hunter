@@ -22,11 +22,52 @@ def ema(xs, n):
     for x in xs[n:]: e = x * k + e * (1 - k)
     return e
 
+def ema_series(xs, n):
+    out = [None] * len(xs)
+    if len(xs) < n: return out
+    k, e = 2 / (n + 1), sum(xs[:n]) / n
+    out[n - 1] = e
+    for i in range(n, len(xs)):
+        e = xs[i] * k + e * (1 - k); out[i] = e
+    return out
+
+def macd_hist_series(closes):
+    e12, e26 = ema_series(closes, 12), ema_series(closes, 26)
+    line = [None if (a is None or b is None) else a - b for a, b in zip(e12, e26)]
+    valid = [x for x in line if x is not None]
+    sig = ema_series(valid, 9)
+    out = [None] * len(closes); off = len(closes) - len(valid)
+    for i, sv in enumerate(sig):
+        if sv is not None: out[off + i] = valid[i] - sv
+    return out
+
+def rolling_max(xs, win, gap):
+    """out[j] = max(xs[max(0, j-win) : j-gap])，單調佇列 O(n)；視窗為空時 None。"""
+    from collections import deque
+    out, dq = [None] * len(xs), deque()
+    for j in range(len(xs)):
+        i = j - gap - 1                      # 本輪新進視窗的索引
+        if i >= 0:
+            while dq and xs[dq[-1]] <= xs[i]: dq.pop()
+            dq.append(i)
+        while dq and dq[0] < j - win: dq.popleft()
+        if dq: out[j] = xs[dq[0]]
+    return out
+
+_IND = {}
+def ind(k):
+    """整段 K 線的指標快取：同一份資料只算一次。"""
+    key = (id(k), len(k), k[0]["t"], k[-1]["t"])
+    if key not in _IND:
+        if len(_IND) > 8: _IND.clear()
+        P = C.ENGINE_E
+        _IND[key] = dict(hist=macd_hist_series([x["c"] for x in k]),
+                         hi_lvl=rolling_max([x["h"] for x in k], P["range_bars"], 12))
+    return _IND[key]
+
 def macd_hist(closes):
     if len(closes) < 35: return None
-    line = [ema(closes[:i], 12) - ema(closes[:i], 26) for i in range(26, len(closes) + 1)]
-    sig = ema(line, 9)
-    return line[-1] - sig if sig is not None else None
+    return macd_hist_series(closes)[-1]
 
 # ---------- A：崩前，頂背馳 + 中樞跌破 ----------
 def engine_a_flags(k, i):
@@ -45,7 +86,8 @@ def engine_a_flags(k, i):
     if i >= 2 * n + 35:
         hi_idx = max(range(i - n, i + 1), key=lambda j: win[j]["h"])
         prev_hi_idx = max(range(i - 2 * n, i - n), key=lambda j: win[j]["h"])
-        h_now, h_prev = macd_hist(closes[:hi_idx + 1]), macd_hist(closes[:prev_hi_idx + 1])
+        hist = ind(k)["hist"]
+        h_now, h_prev = hist[hi_idx], hist[prev_hi_idx]
         if h_now is not None and h_prev is not None:
             f["div"] = win[hi_idx]["h"] >= win[prev_hi_idx]["h"] * 0.98 and h_now < h_prev
     # pivot：最近 pivot_bars 根（不含本根）的高低區間
@@ -166,7 +208,8 @@ def engine_e(k, i):
     # 往回找最近 pull_bars 內的突破棒
     for back in range(2, P["pull_bars"] + 1):
         j = i - back
-        level = max(x["h"] for x in win[j - P["range_bars"]:j - 12])
+        level = ind(k)["hi_lvl"][j]
+        if level is None: continue
         bb = win[j]
         mavol = sum(x["v"] for x in win[j - 20:j]) / 20
         if not (bb["c"] > level and win[j - 1]["c"] <= level and bb["v"] >= P["vol_mult"] * mavol):
