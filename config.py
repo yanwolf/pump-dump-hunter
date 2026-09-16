@@ -9,10 +9,12 @@ API_SECRET = os.environ.get("BINANCE_SECRET", "")
 
 # ---- 掃描層：多頭擁擠名單 ----
 SCAN = dict(
-    min_gain_48h=1.0,        # 48h 漲幅 >= 100%
-    min_funding=0.0010,      # 資金費率 >= 0.10% / 8h
-    min_oi_growth_24h=0.5,   # OI 24h 增幅 >= 50%
-    min_ma20_dev=0.40,       # 價格偏離 1h MA20 >= 40%
+    top_n=40,                # 先取 24h 漲幅前 N 檔算細項（觀察名單）
+    min_gain_48h=0.5,        # 48h 漲幅 >= 50%
+    min_funding=0.0003,      # 資金費率 >= 0.03% / 8h（0.01% 是常態）
+    min_oi_growth_24h=0.3,   # OI 24h 增幅 >= 30%
+    min_ma20_dev=0.25,       # 價格偏離 1h MA20 >= 25%
+    min_score=3,             # 四項中 >= 3 項才進「擁擠名單」
     min_quote_vol_24h=3e6,   # 24h 成交額 >= 300 萬 USDT（太薄的不碰）
     max_quote_vol_24h=3e8,   # 太大的不是小幣
 )

@@ -12,7 +12,7 @@ def paper():
     watch, last = {}, {}
     while True:
         if time.time() - last.get("scan", 0) > 1800:           # 每 30 分重掃
-            watch = {r["symbol"]: r for r in scanner.scan(verbose=False)}
+            watch = {r["symbol"]: r for r in scanner.scan(verbose=False)[0]}
             last["scan"] = time.time(); print("名單:", list(watch))
         for s in watch:
             try:
@@ -35,13 +35,15 @@ def paper():
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
     if cmd == "scan":
-        for r in scanner.scan(): print(r)
+        w, o = scanner.scan()
+        for r in o: print(r)
+        print("擁擠名單:", [r["symbol"] for r in w])
     elif cmd == "backtest":
         sys.argv = sys.argv[1:]; backtest.__name__ = "__main__"; exec(open("backtest.py").read())
     elif cmd == "sweep":
         days = int(sys.argv[2]) if len(sys.argv) > 2 else 30
         end = int(time.time() * 1000); allt = []
-        for r in scanner.scan(verbose=False):
+        for r in scanner.scan(verbose=False)[0]:
             k = B.klines_range(r["symbol"], "5m", end - days * 86400000, end)
             allt += backtest.simulate_each(k)
         backtest.report(allt)
