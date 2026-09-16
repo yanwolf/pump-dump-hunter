@@ -1,7 +1,7 @@
 """Zeabur 入口：HTTP 狀態頁 + 背景 paper/live 迴圈。"""
 import json, os, threading, time, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import binance as B, config as C, risk, scanner, store, telegram
+import binance as B, config as C, risk, scanner, store, telegram, backtest
 from signals import ENGINES, LONG_ENGINES
 
 ENABLED = set(os.environ.get("ENGINES", "A,B,C,D,E").split(","))
@@ -49,7 +49,7 @@ h2{margin:16px 0 6px;font-size:15px;color:#f66}.wrap{overflow-x:auto}
 table{border-collapse:collapse;font-size:12px;white-space:nowrap}
 td,th{padding:5px 8px;border-bottom:1px solid #333;text-align:right}td:first-child,th:first-child{text-align:left}
 .hot{color:#f66;font-weight:bold}.warm{color:#fc6}.long{color:#6d6}.short{color:#f66}
-.meta{color:#888;font-size:12px}.pill{display:inline-block;background:#222;border-radius:8px;padding:2px 8px;margin:2px 4px 2px 0;font-size:12px}
+.meta{color:#888;font-size:12px}input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;padding:6px;font-size:14px}.pill{display:inline-block;background:#222;border-radius:8px;padding:2px 8px;margin:2px 4px 2px 0;font-size:12px}
 </style><div id=app>載入中…</div><script>
 const T=(rows,cols,cls)=>rows.length?'<div class=wrap><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
 rows.map(r=>'<tr class="'+(cls?cls(r):'')+'">'+cols.map(c=>'<td>'+(r[c]??'')).join('')+'</tr>').join('')+'</table></div>':'<div class=meta>（無）</div>';
@@ -60,19 +60,33 @@ document.getElementById('app').innerHTML=`<b>pump-dump-hunter</b>
 <h2>擁擠名單（引擎正在盯）</h2>${T(s.watch,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'])}
 <h2>觀察名單（24h 漲幅前 40，依熱度排）</h2><div class=meta>hits: g=48h漲幅 d=偏離MA20 o=OI增幅 f=資金費率 💥=24h跌超30%（崩後引擎盯） · 百分比單位</div>
 ${T(s.observe,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'],r=>r.score>=3?'hot':r.score==2?'warm':'')}
+<h2>回測（5m，三十天內）</h2>
+<div><input id=bs placeholder="AINUSDT" value="AINUSDT" style="width:110px"> <input id=bd type=number value=3 style="width:50px"> 天
+<button onclick="bt()">跑</button></div><div id=btout class=meta></div>
 <h2>訊號（最新在上）</h2>${T(sig,['time','symbol','engine','side','entry','stop','stop_pct','leverage','notional','executed','reason'],r=>r.side=='LONG'?'long':'short')}
 <h2>錯誤</h2><div class=meta>${s.errors.slice(-10).reverse().join('<br>')||'（無）'}</div>`}
+async function bt(){const o=document.getElementById('btout');o.innerHTML='跑中…';
+const s=document.getElementById('bs').value,d=document.getElementById('bd').value;
+const r=await (await fetch('/api/backtest?s='+s+'&d='+d)).json();
+if(r.error){o.innerHTML='錯誤: '+r.error;return}
+o.innerHTML=`${r.symbol} ${r.bars} 根<br>`+T(r.summary,['engine','n','win','exp','pf','best','worst'])+'<br>'+
+T(r.trades.slice().reverse(),['time','engine','side','entry','exit','r','reason','bars'],x=>x.r>0?'long':'short')}
 load();setInterval(load,60000);</script>"""
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        if self.path == "/api/state": body, ct = json.dumps(store.get(), ensure_ascii=False).encode(), "application/json"
+        if self.path == "/api/state": body, ct = json.dumps(store.get(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/backtest"):
+            q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}
+            try: res = backtest.run(q.get("s", "AINUSDT").upper(), min(int(q.get("d", "3")), 30))
+            except Exception as e: res = dict(error=str(e))
+            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/why"):
             sym = self.path.split("s=")[-1].upper() if "s=" in self.path else ""
             try: res = scanner.why(sym) if sym else dict(usage="/api/why?s=AINUSDT")
             except Exception as e: res = dict(error=str(e))
-            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json"
+            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path == "/health": body, ct = b"ok", "text/plain"
         else: body, ct = PAGE.encode(), "text/html; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct); self.end_headers(); self.wfile.write(body)

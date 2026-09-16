@@ -53,6 +53,23 @@ def simulate_each(k):
     for e in ENGINES: out += simulate(k, (e,))
     return sorted(out, key=lambda t: t["t"])
 
+def summary(trades):
+    """給網頁用的每引擎統計。"""
+    by = {}
+    for t in trades: by.setdefault(t["engine"], []).append(t["r"])
+    out = []
+    for e, rs in sorted(by.items()):
+        wins = [r for r in rs if r > 0]; loss = [r for r in rs if r <= 0]
+        out.append(dict(engine=e, n=len(rs), win=round(len(wins) / len(rs) * 100), exp=round(sum(rs) / len(rs), 2),
+                        pf=round(sum(wins) / abs(sum(loss)), 2) if loss else None, best=max(rs), worst=min(rs)))
+    return out
+
+def run(symbol, days):
+    end = int(time.time() * 1000); k = B.klines_range(symbol, "5m", end - days * 86400000, end)
+    tr = simulate_each(k)
+    for t in tr: t["time"] = time.strftime("%m-%d %H:%M", time.gmtime(t["t"] / 1000)) + " UTC"
+    return dict(symbol=symbol, days=days, bars=len(k), trades=tr, summary=summary(tr))
+
 def report(trades):
     if not trades: print("無交易"); return
     by = {}
