@@ -10,16 +10,19 @@ def sma(xs, n):
 def scan(verbose=True):
     P = C.SCAN
     tick = B.ticker_24h(); fund = B.funding_all()
-    cands = []
+    cands, crashed_rows = [], []
     for s in B.perp_symbols():
         t = tick.get(s)
         if not t: continue
-        qv = float(t["quoteVolume"])
-        if P["min_quote_vol_24h"] <= qv <= P["max_quote_vol_24h"]:
-            cands.append((float(t["priceChangePercent"]), s, qv))
+        qv, chg = float(t["quoteVolume"]), float(t["priceChangePercent"])
+        if qv < P["min_quote_vol_24h"]: continue
+        if chg <= P["crashed_drop"]:                 # 崩盤幣不受成交額上限限制
+            crashed_rows.append((chg, s, qv)); continue
+        if qv <= P["max_quote_vol_24h"]:
+            cands.append((chg, s, qv))
     cands.sort(reverse=True)
-    crashed = {c[1] for c in cands if c[0] <= P["crashed_drop"]}
-    cands = cands[:P["top_n"]] + [c for c in cands if c[1] in crashed]
+    crashed = {c[1] for c in crashed_rows}
+    cands = cands[:P["top_n"]] + crashed_rows
     if verbose: print(f"候選 {len(cands)} 檔")
     observe = []
     for chg24, s, qv in cands:
@@ -43,6 +46,23 @@ def scan(verbose=True):
     observe.sort(key=lambda r: (-r["score"], -r["ma20_dev"]))
     watch = [r for r in observe if r["score"] >= P["min_score"] or r["symbol"] in crashed]
     return watch, observe
+
+def why(symbol):
+    """診斷：一檔幣為什麼沒進名單。"""
+    P = C.SCAN
+    info = {x["symbol"]: x for x in B._get("/fapi/v1/exchangeInfo")["symbols"]}.get(symbol)
+    t = B.ticker_24h().get(symbol)
+    if not info: return dict(symbol=symbol, reason="幣安 USDT 永續沒有這檔")
+    out = dict(symbol=symbol, status=info["status"], contractType=info["contractType"])
+    if not t: out["reason"] = "沒有 24h ticker"; return out
+    qv, chg = float(t["quoteVolume"]), float(t["priceChangePercent"])
+    out.update(quoteVolume=qv, chg24=chg, funding=B.funding_all().get(symbol))
+    if info["status"] != "TRADING": out["reason"] = f"status={info['status']}，perp_symbols() 只收 TRADING"
+    elif qv < P["min_quote_vol_24h"]: out["reason"] = "成交額低於下限"
+    elif chg <= P["crashed_drop"]: out["reason"] = "應在崩盤名單（若沒有，重掃一次）"
+    elif qv > P["max_quote_vol_24h"]: out["reason"] = "成交額超過上限，被當大幣排除"
+    else: out["reason"] = "在候選內，但 24h 漲幅沒進前 N"
+    return out
 
 if __name__ == "__main__":
     w, o = scan()

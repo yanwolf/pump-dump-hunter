@@ -68,6 +68,11 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == "/api/state": body, ct = json.dumps(store.get(), ensure_ascii=False).encode(), "application/json"
+        elif self.path.startswith("/api/why"):
+            sym = self.path.split("s=")[-1].upper() if "s=" in self.path else ""
+            try: res = scanner.why(sym) if sym else dict(usage="/api/why?s=AINUSDT")
+            except Exception as e: res = dict(error=str(e))
+            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json"
         elif self.path == "/health": body, ct = b"ok", "text/plain"
         else: body, ct = PAGE.encode(), "text/html; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct); self.end_headers(); self.wfile.write(body)
