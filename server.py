@@ -5,15 +5,26 @@ import binance as B, config as C, risk, scanner, store, telegram, backtest, swee
 from signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
-TRADE = os.environ.get("TRADE", "0") == "1"          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
+TRADE = os.environ.get("TRADE", "0") == "1"
+STOP_FAIL_CLOSE = os.environ.get("STOP_FAIL", "close") == "close"   # 停損單掛不上時：close=立刻平倉 keep=只告警          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
 SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 
 def reconcile():
-    """跟交易所對帳：自己開的倉不在了 → 標記平倉。回傳 (自己還在場的倉數, 交易所全部持倉)。"""
-    own = store.get().get("open", {})
+    """跟交易所對帳：自己開的倉不在了 → 標記平倉；下單當下掛掉、沒記到帳的倉 → 認領回來。
+    回傳 (自己還在場的倉數, 交易所全部持倉)。"""
+    st = store.get()
+    own, pend = st.get("open", {}), dict(st.get("pending", {}))
     if not C.API_KEY: return 0, []
     ex = B.open_positions()
     ex_syms = {p["symbol"] for p in ex}
+    if pend:                                   # pending = 送出市價單前先寫的紀錄
+        own = dict(own)
+        for sym, rec in pend.items():
+            if sym in ex_syms and sym not in own:
+                own[sym] = dict(rec, adopted=True)
+                store.push("errors", f"{time.strftime('%m-%d %H:%M')} 認領無紀錄持倉 {sym}（引擎{rec.get('engine')}）")
+                telegram.send(f"♻️ 認領 {sym} 引擎{rec.get('engine')}：下單後紀錄遺失，已補記帳。請確認停損單是否存在")
+        store.update(open=own, pending={})
     still, changed = {}, False
     for sym, rec in own.items():
         if sym in ex_syms: still[sym] = rec
@@ -21,7 +32,53 @@ def reconcile():
             rec = dict(rec, closed=time.strftime("%m-%d %H:%M")); store.push("closed", rec); changed = True
             telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 已平倉（止損/追蹤觸發）")
     if changed or len(still) != len(own): store.update(open=still)
+    store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
+                                upnl=round(float(p.get("unRealizedProfit") or 0), 2),
+                                owner="本策略" if p["symbol"] in still else "其他") for p in ex])
     return len(still), ex
+
+def place(sym, eid, sig, sz, rec):
+    """下單。順序很重要：市價單送出前先寫 pending，成交後立刻記帳，最後才掛停損，
+    這樣任何一步炸掉都不會出現『倉在交易所、程式卻不知道』的孤兒倉。"""
+    is_long = sig.side == "LONG"
+    close_side = "SELL" if is_long else "BUY"
+    store.update(pending={sym: dict(engine=eid, side=sig.side, time=rec["time"], entry=sig.entry, stop=sig.stop)})
+    try:
+        B.set_leverage(sym, sz["leverage"])
+        o = B.market_order(sym, "BUY" if is_long else "SELL", sz["qty"])
+    except Exception as e:
+        store.update(pending={})
+        rec["skipped"] = f"下單失敗: {e}"
+        store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 下單失敗 {e}")
+        telegram.send(f"❌ {sym} 引擎{eid} 下單失敗：{e}")
+        return rec
+    qty = float(o.get("executedQty") or 0) or float(B.round_qty(sym, sz["qty"]))
+    fill = float(o.get("avgPrice") or 0) or None
+    rec["executed"] = True; rec["fill"] = fill; rec["qty"] = qty
+    rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
+    own = dict(store.get().get("open", {}))
+    own[sym] = dict(engine=eid, side=sig.side, time=rec["time"], entry=sig.entry, fill=fill, stop=sig.stop, qty=qty)
+    store.update(open=own, pending={})
+    store.push("trades", rec)
+
+    err = None                                  # 停損單：失敗重試一次
+    for _ in range(2):
+        try: B.stop_order(sym, close_side, qty, sig.stop); err = None; break
+        except Exception as e: err = str(e); time.sleep(1)
+    if not err: return rec
+    rec["stop_error"] = err
+    store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 停損單失敗 {err}")
+    if STOP_FAIL_CLOSE:
+        try:
+            B.market_order(sym, close_side, qty, reduce_only=True)
+            own = dict(store.get().get("open", {})); own.pop(sym, None); store.update(open=own)
+            rec["skipped"] = f"停損掛不上已平倉: {err}"
+            telegram.send(f"🛑 {sym} 引擎{eid} 停損單掛不上（{err}），已立即市價平倉")
+        except Exception as e2:
+            telegram.send(f"🚨 {sym} 引擎{eid} 停損掛不上、平倉也失敗（{err} / {e2}）— 倉位無保護，請手動處理")
+    else:
+        telegram.send(f"🚨 {sym} 引擎{eid} 已進場但停損單掛不上（{err}）— 倉位無保護，請手動處理")
+    return rec
 
 def loop():
     try: lf = presets.apply_live()
@@ -43,6 +100,7 @@ def loop():
                 except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} reconcile {e}")
             t0 = time.time()
             for s in list(watch):
+              try:
                 k = B.klines(s, "5m", 150)      # 引擎最多回看 ~60 根，150 夠用且省一半傳輸
                 k1m = B.klines(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
                 for eid in ENABLED:
@@ -58,26 +116,22 @@ def loop():
                     rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False)
                     if TRADE and C.API_KEY:
                         n_own, ex = reconcile()
-                        if n_own >= C.SIZING["max_positions"]:
+                        mine = store.get().get("open", {})
+                        if s in mine:
+                            rec["skipped"] = f"本策略已持有此幣（引擎{mine[s].get('engine')}）"
+                        elif n_own >= C.SIZING["max_positions"]:
                             rec["skipped"] = f"本策略持倉已 {n_own} 筆"
                         elif any(p["symbol"] == s for p in ex):
-                            rec["skipped"] = "該幣帳號內已有倉（可能是其他專案）"
+                            rec["skipped"] = "該幣帳號內已有倉（其他專案）"
                         if rec.get("skipped"):
                             store.push("signals", rec); telegram.send(f"⏸ 略過 {s} 引擎{eid}：{rec['skipped']}"); break
-                        is_long = sig.side == "LONG"
-                        B.set_leverage(s, sz["leverage"])
-                        o = B.market_order(s, "BUY" if is_long else "SELL", round(sz["qty"]))
-                        fill = float(o.get("avgPrice") or 0) or None
-                        B.stop_order(s, "SELL" if is_long else "BUY", round(sz["qty"]), round(sig.stop, 6))
-                        rec["executed"] = True; rec["fill"] = fill
-                        rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
-                        store.push("trades", rec)
-                        own = dict(store.get().get("open", {})); own[s] = dict(engine=eid, side=sig.side, time=rec["time"], entry=sig.entry, fill=fill, stop=sig.stop, qty=round(sz["qty"]))
-                        store.update(open=own)
+                        rec = place(s, eid, sig, sz, rec)
                     store.push("signals", rec)
                     telegram.send(f"{'✅下單' if rec['executed'] else '👀訊號'} {s} 引擎{eid} {'多' if sig.side == 'LONG' else '空'} @{sig.entry:.5g} "
                                   f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U" + (f" 成交{rec['fill']:.5g} 滑價{rec['slip_pct']}%" if rec.get("fill") else "") + f"\n{sig.reason}")
                     break
+              except Exception as e:
+                store.push("errors", f"{time.strftime('%m-%d %H:%M')} {s} {e}"); traceback.print_exc()
             took = round(time.time() - t0, 1)
             store.update(loop=dict(took=took, symbols=len(watch), at=time.strftime("%H:%M:%S")))
             if took > POLL_SEC * 0.7:
@@ -207,10 +261,13 @@ async function load(){let s;try{s=await (await fetch('/api/state')).json()}catch
  <div class=card><h2>錯誤與警告</h2><div class=meta>${(s.errors||[]).slice(-8).reverse().join('<br>')||'（無）'}</div></div>`;
  const sig=s.signals.slice().reverse();
  $('trade').innerHTML=`
- <div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty'])}</div>
+ <div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty','adopted'])}</div>
+ <div class=card><h2>帳號全部持倉 · 對帳用</h2>
+   <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）</div>
+   ${T(s.exchange||[],['symbol','owner','amt','entry','upnl'])}</div>
  <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','entry','fill','stop','qty'])}</div>
  <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
-   ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','reason'])}</div>`}
+   ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','stop_error','reason'])}</div>`}
 
 async function bt(){const o=$('btout');o.innerHTML='跑中…';
  const r=await (await fetch('/api/backtest?s='+$('bs').value+'&d='+$('bd').value)).json();
