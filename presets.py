@@ -1,42 +1,57 @@
 """參數預設集：存在 DATA_DIR/presets.json（Zeabur Volume），重佈不會掉。
 - 具名預設：{"名稱": {"SCAN.watch_chg24": 15, ...}}
 - live：目前套用到實盤的那組覆蓋，程式啟動時自動載入
+介面（server.py 用）：all / all_presets / live / save_preset / delete_preset / set_live / apply_live / boot
 """
-import json, os
+import json, os, copy, threading
 import config as C, params
 
 DATA_DIR = os.environ.get("DATA_DIR", "./data"); os.makedirs(DATA_DIR, exist_ok=True)
 PATH = os.path.join(DATA_DIR, "presets.json")
+_lock = threading.Lock()
+_KEYS = ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "ENGINE_F", "ENGINE_G", "EXIT", "RISK")
+_DEFAULTS = {k: copy.deepcopy(getattr(C, k)) for k in _KEYS}   # 程式預設值快照（import 時、尚未套任何覆蓋）
 
 def _load():
-    try: return json.load(open(PATH))
+    try:
+        d = json.load(open(PATH))
+        d.setdefault("presets", {}); d.setdefault("live", {}); d.setdefault("live_name", None)
+        return d
     except Exception: return {"presets": {}, "live": {}, "live_name": None}
 
-def _save(d): json.dump(d, open(PATH, "w"), ensure_ascii=False, indent=1)
+def _save(d):
+    tmp = PATH + ".tmp"
+    json.dump(d, open(tmp, "w"), ensure_ascii=False, indent=1); os.replace(tmp, PATH)
 
 def all(): return _load()
+def all_presets(): return _load()["presets"]
+def live(): return _load()["live"] or {}
 
-def save(name, form):
-    d = _load(); d["presets"][name] = form; _save(d); return d
+def save_preset(name, form):
+    with _lock: d = _load(); d["presets"][name] = form; _save(d)
 
-def delete(name):
-    d = _load(); d["presets"].pop(name, None)
-    if d.get("live_name") == name: d["live_name"] = None
-    _save(d); return d
+def delete_preset(name):
+    with _lock:
+        d = _load(); d["presets"].pop(name, None)
+        if d.get("live_name") == name: d["live_name"] = None
+        _save(d)
 
-def apply_live(form, name=None):
-    """套用到實盤（改動 config 的全域值），並記到檔案，下次啟動自動重套。"""
-    C.apply_overrides(params.to_overrides(form))
-    d = _load(); d["live"] = form; d["live_name"] = name; _save(d); return d
+def set_live(form, name=None):
+    with _lock: d = _load(); d["live"] = form or {}; d["live_name"] = name; _save(d)
 
-def clear_live():
-    d = _load(); d["live"] = {}; d["live_name"] = None; _save(d)
-    return d   # 需重啟服務才會回到程式預設
+def apply_live():
+    """先回到程式預設，再套 Volume 裡的 live 覆蓋；回傳套用的表單。空表單 = 立即回預設，不用重啟。"""
+    form = live()
+    C.restore(copy.deepcopy(_DEFAULTS))
+    if form:
+        try: C.apply_overrides(params.to_overrides(form))
+        except Exception as e: print("apply_live fail:", e)
+    return form
 
 def boot():
-    """啟動時重新套用上次的實盤覆蓋。"""
-    d = _load()
-    if d.get("live"):
-        try: C.apply_overrides(params.to_overrides(d["live"]))
-        except Exception as e: print("preset boot fail:", e)
-    return d
+    apply_live(); return _load()
+
+# 舊介面相容
+def save(name, form): save_preset(name, form); return _load()
+def delete(name): delete_preset(name); return _load()
+def clear_live(): set_live({}); apply_live(); return _load()

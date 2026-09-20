@@ -1,7 +1,7 @@
 """Zeabur 入口：HTTP 狀態頁 + 背景 paper/live 迴圈。"""
 import json, os, threading, time, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params, presets, presets
+import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params, presets
 from signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
@@ -24,7 +24,9 @@ def reconcile():
     return len(still), ex
 
 def loop():
-    lf = presets.apply_live()
+    try: lf = presets.apply_live()
+    except Exception as e:
+        lf = {}; store.push("errors", f"{time.strftime('%m-%d %H:%M')} 實盤參數覆蓋載入失敗 {e}")
     store.update(started=time.strftime("%Y-%m-%d %H:%M:%S"), live_overrides=lf)
     if lf: telegram.send(f"⚙️ 套用實盤參數覆蓋 {len(lf)} 項：" + ", ".join(f"{k.split('.')[-1]}={v}" for k, v in lf.items()))
     telegram.send(f"🎯 pump-dump-hunter 啟動 engines={sorted(ENABLED)} trade={TRADE} testnet={C.USE_TESTNET}")
@@ -184,7 +186,8 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));
   document.querySelectorAll('.pane').forEach(p=>p.style.display=p.id===t.dataset.t?'':'none')});
 
-async function load(){const s=await (await fetch('/api/state')).json();
+async function load(){let s;try{s=await (await fetch('/api/state')).json()}catch(e){$('hmeta').innerHTML='<span style=color:var(--down)>連線失敗：'+e.message+'</span>';return}
+ if(s.error){$('hmeta').innerHTML='<span style=color:var(--down)>後端錯誤：'+s.error+'</span>';return}
  const e=s.equity||{},L=s.loop;
  const lo=Object.keys(s.live_overrides||{}).length;
  $('hmeta').innerHTML=`啟動 ${s.started||'—'} · 掃描 ${s.last_scan||'—'} · 迴圈 ${L?L.took+'s / '+L.symbols+' 檔':'—'}`+
@@ -262,11 +265,17 @@ async function pform(){if(!PS.length)PS=await (await fetch('/api/params')).json(
  $('pform').innerHTML=h+'</div>'}
 function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
 async function sigclear(){if(!confirm('清除訊號紀錄？（已下單紀錄保留）'))return;await fetch('/api/signals/clear');load()}
-load();swload();pmeta();setInterval(load,60000);</script>"""
+load();swload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>"""
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        try: body, ct = self._route()
+        except Exception as e:
+            traceback.print_exc()
+            body, ct = json.dumps(dict(error=f"{type(e).__name__}: {e}"), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        self.send_response(200); self.send_header("Content-Type", ct); self.end_headers(); self.wfile.write(body)
+    def _route(self):
         if self.path == "/api/state":
             s = store.get()
             s["live_overrides"] = presets.live()
@@ -295,19 +304,6 @@ class H(BaseHTTPRequestHandler):
                 telegram.send(f"⚙️ 實盤參數覆蓋更新：{len(form)} 項" if form else "⚙️ 實盤參數覆蓋已清空，回到預設")
             body = json.dumps(dict(presets=presets.all_presets(), live=presets.live()), ensure_ascii=False).encode()
             ct = "application/json; charset=utf-8"
-        elif self.path.startswith("/api/presets"):
-            import urllib.parse
-            q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
-            name = q.get("n", [""])[0]
-            try: form = json.loads(q["o"][0]) if q.get("o") and q["o"][0].strip() else {}
-            except Exception: form = {}
-            act = self.path.split("?")[0].rsplit("/", 1)[-1]
-            if act == "save" and name: res = presets.save(name, form)
-            elif act == "delete" and name: res = presets.delete(name)
-            elif act == "live": res = presets.apply_live(form, name or None)
-            elif act == "clearlive": res = presets.clear_live()
-            else: res = presets.all()
-            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/params"):
             body, ct = json.dumps(params.schema(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep/clear"):
@@ -336,7 +332,7 @@ class H(BaseHTTPRequestHandler):
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path == "/health": body, ct = b"ok", "text/plain"
         else: body, ct = PAGE.encode(), "text/html; charset=utf-8"
-        self.send_response(200); self.send_header("Content-Type", ct); self.end_headers(); self.wfile.write(body)
+        return body, ct
 
 if __name__ == "__main__":
     try:
