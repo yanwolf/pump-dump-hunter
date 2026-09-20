@@ -1,7 +1,7 @@
 """Zeabur 入口：HTTP 狀態頁 + 背景 paper/live 迴圈。"""
 import json, os, threading, time, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params
+import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params, presets, presets
 from signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
@@ -24,7 +24,9 @@ def reconcile():
     return len(still), ex
 
 def loop():
-    store.update(started=time.strftime("%Y-%m-%d %H:%M:%S"))
+    lf = presets.apply_live()
+    store.update(started=time.strftime("%Y-%m-%d %H:%M:%S"), live_overrides=lf)
+    if lf: telegram.send(f"⚙️ 套用實盤參數覆蓋 {len(lf)} 項：" + ", ".join(f"{k.split('.')[-1]}={v}" for k, v in lf.items()))
     telegram.send(f"🎯 pump-dump-hunter 啟動 engines={sorted(ENABLED)} trade={TRADE} testnet={C.USE_TESTNET}")
     watch, last, last_scan = {}, {}, 0
     while True:
@@ -110,7 +112,9 @@ h2{font-size:13px;margin:0 0 8px;color:var(--gold);font-weight:600}
 table{border-collapse:collapse;font-size:12px;white-space:nowrap;width:100%}
 th{color:var(--dim);font-weight:500;text-align:right;padding:5px 8px;border-bottom:1px solid var(--line)}
 td{text-align:right;padding:6px 8px;border-bottom:1px solid #1e2228}
-th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--card)}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--card);max-width:150px;overflow:hidden;text-overflow:ellipsis}
+#swout td:first-child,#swout th:first-child{max-width:110px}
+td.lbl{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 tr:last-child td{border-bottom:none}
 .pos{color:var(--up)}.neg{color:var(--down)}.hot{color:var(--gold);font-weight:600}
 .empty{color:var(--dim);font-size:12px;padding:6px 0}
@@ -154,9 +158,15 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
       <button onclick="swtoggle()">收合</button><button onclick="swclear()">清除</button></div>
     <div id=swout class=meta>尚未執行</div>
   </div>
-  <div class=card><h2>參數調整 <button onclick="ptoggle()" style="font-size:11px;padding:3px 8px">顯示/隱藏</button>
-      <button onclick="pform()" style="font-size:11px;padding:3px 8px">全部還原</button></h2>
-    <div class=meta>改哪個填哪個，沒填的用預設（括號內）。有標引擎名的優先於「全部引擎」。</div>
+  <div class=card><h2>參數調整</h2>
+    <div class=meta>表單的值<b>只用於這次掃描</b>。要長期保留請「存成組合」；要讓實盤照這些值跑，按「套用到實盤」（寫入 Volume，重佈後仍有效）。</div>
+    <div class=row style=margin-top:8px>
+      <select id=psel style="flex:1;min-width:130px"><option value="">— 載入組合 —</option></select>
+      <button onclick="pload()">載入</button><button onclick="psave()">存成組合</button><button onclick="pdel()">刪除</button></div>
+    <div class=row>
+      <button onclick="ptoggle()">顯示/隱藏參數</button><button onclick="pclear()">清空表單</button>
+      <button class=go onclick="plive()">套用到實盤</button><button onclick="plivereset()">實盤回預設</button></div>
+    <div id=plivebox class=meta></div>
     <div id=pform style=display:none></div>
   </div>
 </div>
@@ -168,14 +178,17 @@ function T(rows,cols,cls){if(!rows||!rows.length)return '<div class=empty>（無
  return '<div class=scroll><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
  rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v===undefined||v===null)v='';
    let k='';if(typeof v==='number'){if(c==='r'||c[0]==='R'&&c.length<4||c==='total')k=v>0?'pos':v<0?'neg':''}
-   return '<td class="'+k+'">'+v}).join('')+'</tr>').join('')+'</table></div>'}
+   if(c==='label'||c==='reason'||c==='skipped')k+=' lbl';
+   return '<td class="'+k+'" title="'+String(v).replace(/"/g,'')+'">'+v}).join('')+'</tr>').join('')+'</table></div>'}
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));
   document.querySelectorAll('.pane').forEach(p=>p.style.display=p.id===t.dataset.t?'':'none')});
 
 async function load(){const s=await (await fetch('/api/state')).json();
  const e=s.equity||{},L=s.loop;
- $('hmeta').innerHTML=`啟動 ${s.started||'—'} · 掃描 ${s.last_scan||'—'} · 迴圈 ${L?L.took+'s / '+L.symbols+' 檔':'—'}`;
+ const lo=Object.keys(s.live_overrides||{}).length;
+ $('hmeta').innerHTML=`啟動 ${s.started||'—'} · 掃描 ${s.last_scan||'—'} · 迴圈 ${L?L.took+'s / '+L.symbols+' 檔':'—'}`+
+   (lo?` · <span style=color:var(--gold)>實盤覆蓋 ${lo} 項</span>`:'');
  $('hstats').innerHTML=[
    ['持倉',Object.keys(s.open||{}).length],['擁擠',s.watch.length],['觀察',s.observe.length],
    ['訊號',s.signals.length],['已下單',s.trades.length],
@@ -225,21 +238,40 @@ async function swload(){const o=$('swout');const r=await (await fetch('/api/swee
  o.innerHTML=h;
  if(!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}
 
-let PS=[];function ptoggle(){const p=$('pform');p.style.display=p.style.display=='none'?'':'none';if(!PS.length)pform()}
+let PS=[],PRE={},LIVE={};
+function ptoggle(){const p=$('pform');p.style.display=p.style.display=='none'?'':'none';if(!PS.length)pform()}
+function pclear(){document.querySelectorAll('.pv').forEach(i=>i.value='')}
+function pfill(form){pclear();for(const [k,v] of Object.entries(form||{})){const el=document.querySelector('.pv[data-k="'+k+'"]');if(el)el.value=v}}
+async function pmeta(q){const r=await (await fetch('/api/presets'+(q||''))).json();PRE=r.presets||{};LIVE=r.live||{};
+ $('psel').innerHTML='<option value="">— 載入組合 —</option>'+Object.keys(PRE).map(n=>`<option>${n}</option>`).join('');
+ const n=Object.keys(LIVE).length;
+ $('plivebox').innerHTML=n?`實盤目前覆蓋 <b>${n}</b> 項：`+Object.entries(LIVE).map(([k,v])=>k.split('.').slice(-1)+'='+v).join('、'):'實盤目前使用程式預設值';}
+async function pload(){if(!PS.length)await pform();const n=$('psel').value;if(!n)return;pfill(PRE[n]);$('pform').style.display=''}
+async function psave(){const n=prompt('組合名稱：');if(!n)return;
+ await pmeta('?act=save&name='+encodeURIComponent(n)+'&form='+encodeURIComponent(JSON.stringify(pcollect())));alert('已存：'+n)}
+async function pdel(){const n=$('psel').value;if(!n||!confirm('刪除組合 '+n+'？'))return;await pmeta('?act=del&name='+encodeURIComponent(n))}
+async function plive(){const f=pcollect();if(!Object.keys(f).length){alert('表單是空的');return}
+ if(!confirm('把這 '+Object.keys(f).length+' 項套用到實盤？立即生效，重佈後仍有效。'))return;
+ await pmeta('?act=live&form='+encodeURIComponent(JSON.stringify(f)));alert('已套用到實盤');load()}
+async function plivereset(){if(!confirm('實盤參數回到程式預設？'))return;await pmeta('?act=live&form=%7B%7D');alert('已回預設');load()}
 async function pform(){if(!PS.length)PS=await (await fetch('/api/params')).json();
+ await pmeta();
  let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+=(h?'</div>':'')+'<div class=pgrp><h3>'+g+'</h3>'}
   h+=`<div class=p><label>${s.label} <span class=meta>(${s.default}${s.unit?' '+s.unit:''})</span></label>
    <input class=pv data-k="${s.k}" type=number step="${s.step}" placeholder="${s.default}"><div class=d>${s.help}</div></div>`}
  $('pform').innerHTML=h+'</div>'}
 function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
 async function sigclear(){if(!confirm('清除訊號紀錄？（已下單紀錄保留）'))return;await fetch('/api/signals/clear');load()}
-load();swload();setInterval(load,60000);</script>"""
+load();swload();pmeta();setInterval(load,60000);</script>"""
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == "/api/state":
             s = store.get()
+            s["live_overrides"] = presets.live()
+            try: s["live_preset"] = presets.all().get("live_name") or ("自訂" if presets.all().get("live") else None)
+            except Exception: pass
             try: eq, bal = risk.equity_now(); s["equity"] = dict(tier=eq, balance=bal, error=risk._bal.get("error"), **C.SIZING)
             except Exception as e: s["equity"] = dict(error=str(e))
             body, ct = json.dumps(s, ensure_ascii=False).encode(), "application/json; charset=utf-8"
@@ -250,6 +282,32 @@ class H(BaseHTTPRequestHandler):
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/signals/clear"):
             store.update(signals=[]); body, ct = b'{"ok":true}', "application/json; charset=utf-8"
+        elif self.path.startswith("/api/presets"):
+            import urllib.parse
+            q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
+            act = q.get("act", [""])[0]; name = q.get("name", [""])[0]
+            try: form = json.loads(q.get("form", ["{}"])[0] or "{}")
+            except Exception: form = {}
+            if act == "save" and name: presets.save_preset(name, form)
+            elif act == "del" and name: presets.delete_preset(name)
+            elif act == "live":
+                presets.set_live(form); presets.apply_live(); store.update(live_overrides=form)
+                telegram.send(f"⚙️ 實盤參數覆蓋更新：{len(form)} 項" if form else "⚙️ 實盤參數覆蓋已清空，回到預設")
+            body = json.dumps(dict(presets=presets.all_presets(), live=presets.live()), ensure_ascii=False).encode()
+            ct = "application/json; charset=utf-8"
+        elif self.path.startswith("/api/presets"):
+            import urllib.parse
+            q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
+            name = q.get("n", [""])[0]
+            try: form = json.loads(q["o"][0]) if q.get("o") and q["o"][0].strip() else {}
+            except Exception: form = {}
+            act = self.path.split("?")[0].rsplit("/", 1)[-1]
+            if act == "save" and name: res = presets.save(name, form)
+            elif act == "delete" and name: res = presets.delete(name)
+            elif act == "live": res = presets.apply_live(form, name or None)
+            elif act == "clearlive": res = presets.clear_live()
+            else: res = presets.all()
+            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/params"):
             body, ct = json.dumps(params.schema(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep/clear"):
@@ -281,6 +339,10 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Type", ct); self.end_headers(); self.wfile.write(body)
 
 if __name__ == "__main__":
+    try:
+        _p = presets.boot()
+        if _p.get("live"): print("套用實盤參數覆蓋:", _p.get("live_name") or "自訂", _p["live"])
+    except Exception as e: print("preset boot:", e)
     threading.Thread(target=loop, daemon=True).start()
     port = int(os.environ.get("PORT", "8080")); print("listening", port)
     HTTPServer(("0.0.0.0", port), H).serve_forever()
