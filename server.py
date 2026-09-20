@@ -32,7 +32,7 @@ def reconcile(force=False):
     for sym, rec in own.items():
         if sym in ex_syms: still[sym] = rec
         else:
-            rec = dict(rec, closed=time.strftime("%m-%d %H:%M")); store.push("closed", rec); changed = True
+            rec = dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="交易所"); store.push("closed", rec); changed = True
             telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 已平倉（止損/追蹤觸發）")
     if changed or len(still) != len(own): store.update(open=still)
     store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
@@ -146,6 +146,11 @@ def loop():
             store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
         time.sleep(max(1, POLL_SEC - (time.time() - t0 if "t0" in dir() else 0)))
 
+def _refresh():
+    """手動動作後立刻重抓帳號持倉，畫面不用等下一輪迴圈。"""
+    try: time.sleep(0.5); reconcile(force=True)
+    except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} 對帳更新失敗 {e}")
+
 def manage(act, sym, eid="?", stop=None):
     """手動處理帳號裡的孤兒倉（修正前留下的、或別的原因沒記到帳的）。"""
     pos = next((p for p in B.open_positions() if p["symbol"] == sym), None)
@@ -156,8 +161,8 @@ def manage(act, sym, eid="?", stop=None):
     if act == "close":
         B.market_order(sym, "SELL" if is_long else "BUY", qty, reduce_only=True)
         rec = own.pop(sym, None) or dict(engine=eid, side="LONG" if is_long else "SHORT", entry=entry, qty=qty)
-        store.update(open=own); store.push("closed", dict(rec, closed=time.strftime("%m-%d %H:%M"), by="手動"))
-        telegram.send(f"🏁 手動平倉 {sym}")
+        store.update(open=own); store.push("closed", dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="手動"))
+        _refresh(); telegram.send(f"🏁 手動平倉 {sym}")
         return dict(ok=True, msg=f"{sym} 已平倉")
     if act == "adopt":
         if not stop: return dict(error="請填停損價")
@@ -167,7 +172,7 @@ def manage(act, sym, eid="?", stop=None):
         B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)
         own[sym] = dict(engine=eid, side="LONG" if is_long else "SHORT", time=time.strftime("%m-%d %H:%M"),
                         entry=entry, fill=entry, stop=stop, qty=qty, adopted=True)
-        store.update(open=own)
+        store.update(open=own); _refresh()
         telegram.send(f"♻️ 手動認領 {sym} 引擎{eid}，已補掛停損 {stop}")
         return dict(ok=True, msg=f"{sym} 已認領並補掛停損 {stop}")
     return dict(error="未知動作")
@@ -224,7 +229,21 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
 </header>
 <div class=wrap>
 <div id=watch class=pane></div>
-<div id=trade class=pane style=display:none></div>
+<div id=trade class=pane style=display:none>
+  <div id=t_open></div>
+  <div class=card><h2>帳號全部持倉 · 對帳用</h2>
+    <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）。點表格中的一列會自動帶入下方欄位。
+      確定是本策略漏記的孤兒倉，可以認領回來（會補掛停損）或直接平掉。自動刷新不會清掉你填的內容。</div>
+    <div class=row>
+      <select id=mx style="flex:1;min-width:120px"><option value="">— 選幣 —</option></select>
+      <select id=me style="width:70px"><option>C</option><option>F</option><option selected>G</option></select>
+      <input id=ms placeholder=停損價 inputmode=decimal style="width:100px"></div>
+    <div class=row><button class=go onclick="mpos('adopt')">認領+補停損</button><button onclick="mpos('close')">平倉</button>
+      <span id=mout class=meta></span></div>
+    <div id=t_ex></div>
+  </div>
+  <div id=t_rest></div>
+</div>
 <div id=lab class=pane style=display:none>
   <div class=card><h2>單幣回測（5m，最多 30 天）</h2>
     <div class=row><input id=bs value="AIN" style="width:85px"><span class=meta>USDT</span>
@@ -290,20 +309,19 @@ async function load(){let s;try{s=await (await fetch('/api/state')).json()}catch
    ${T(s.observe,wcols)}</div>
  <div class=card><h2>錯誤與警告</h2><div class=meta>${(s.errors||[]).slice(-8).reverse().join('<br>')||'（無）'}</div></div>`;
  const sig=s.signals.slice().reverse();
- $('trade').innerHTML=`
- <div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty','adopted'])}</div>
- <div class=card><h2>帳號全部持倉 · 對帳用</h2>
-   <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）。
-     如果確定某筆是本策略漏記的孤兒倉，用下面的欄位認領回來（會順便補掛停損），或直接平掉。</div>
-   <div class=row>
-     <input id=mx placeholder=幣別 style="width:90px"><input id=me placeholder=引擎 style="width:55px">
-     <input id=ms placeholder=停損價 style="width:95px">
-     <button class=go onclick="madopt()">認領+補停損</button><button onclick="mclose()">平倉</button></div>
-   <div id=mout class=meta style=margin-bottom:8px></div>
-   ${T(s.exchange||[],['symbol','owner','amt','entry','upnl'])}</div>
- <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','entry','fill','stop','qty'])}</div>
+ $('t_open').innerHTML=`<div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty','adopted'])}</div>`;
+ const ex=s.exchange||[];
+ $('t_ex').innerHTML=T(ex,['symbol','owner','amt','entry','upnl']);
+ document.querySelectorAll('#t_ex tr').forEach((tr,i)=>{if(i&&ex[i-1]){tr.style.cursor='pointer';tr.onclick=()=>{$('mx').value=ex[i-1].symbol;$('mout').innerHTML=''}}});
+ const cur=$('mx').value;   // 保留使用者目前的選擇
+ $('mx').innerHTML='<option value="">— 選幣 —</option>'+ex.map(p=>`<option value="${p.symbol}">${p.symbol}（${p.owner}·${p.amt>0?'多':'空'}）</option>`).join('')+
+   (cur&&!ex.some(p=>p.symbol===cur)?`<option value="${cur}">${cur}（已不在帳號）</option>`:'');
+ $('mx').value=cur;
+ $('t_rest').innerHTML=`
+ <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','entry','fill','stop','qty','by'])}</div>
  <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
    ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','stop_error','reason'])}</div>`}
+
 
 async function bt(){const o=$('btout');o.innerHTML='跑中…';
  const r=await (await fetch('/api/backtest?s='+$('bs').value+'&d='+$('bd').value)).json();
@@ -357,12 +375,10 @@ async function pform(){if(!PS.length)PS=await (await fetch('/api/params')).json(
    <input class=pv data-k="${s.k}" type=number step="${s.step}" placeholder="${s.default}"><div class=d>${s.help}</div></div>`}
  $('pform').innerHTML=h+'</div>'}
 function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
-async function mpos(act){const o=$('mout');const sym=$('mx').value.trim();if(!sym){o.innerHTML='請填幣別';return}
+async function mpos(act){const o=$('mout');const sym=$('mx').value;if(!sym){o.innerHTML='請先選幣';return}
  if(!confirm((act=='close'?'平倉 ':'認領 ')+sym+'？'))return;o.innerHTML='處理中…';
  const r=await (await fetch('/api/pos?act='+act+'&s='+encodeURIComponent(sym)+'&e='+encodeURIComponent($('me').value||'?')+'&stop='+encodeURIComponent($('ms').value||''))).json();
- o.innerHTML=r.error?'<span style=color:var(--down)>'+r.error+'</span>':r.msg;load()}
-function madopt(){mpos('adopt')}
-function mclose(){mpos('close')}
+ o.innerHTML=r.error?'<span style=color:var(--down)>'+r.error+'</span>':r.msg;if(!r.error){$('ms').value='';$('mx').value=''}load()}
 async function sigclear(){if(!confirm('清除訊號紀錄？（已下單紀錄保留）'))return;await fetch('/api/signals/clear');load()}
 load();swload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>"""
 
