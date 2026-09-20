@@ -91,80 +91,149 @@ def norm_symbol(s):
 
 PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>pump-dump-hunter</title><style>
-body{font:14px -apple-system,sans-serif;background:#111;color:#ddd;margin:12px}
-h2{margin:16px 0 6px;font-size:15px;color:#f66}.wrap{overflow-x:auto}
-table{border-collapse:collapse;font-size:12px;white-space:nowrap}
-td,th{padding:5px 8px;border-bottom:1px solid #333;text-align:right}td:first-child,th:first-child{text-align:left}
-.hot{color:#f66;font-weight:bold}.warm{color:#fc6}.long{color:#6d6}.short{color:#f66}
-.meta{color:#888;font-size:12px}.pill{display:inline-block;background:#222;border-radius:8px;padding:2px 8px;margin:2px 4px 2px 0;font-size:12px}
-input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;padding:6px;font-size:14px}
+:root{--bg:#0f1114;--card:#171a1f;--line:#262b33;--txt:#e6e8eb;--dim:#8b939e;--gold:#e8b339;--up:#3ecf8e;--down:#f2616b}
+*{box-sizing:border-box}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:0 0 40px}
+.wrap{padding:12px;max-width:1100px;margin:0 auto}
+header{position:sticky;top:0;z-index:9;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 12px}
+h1{font-size:15px;margin:0 0 4px;color:var(--gold);letter-spacing:.5px}
+h2{font-size:13px;margin:0 0 8px;color:var(--gold);font-weight:600}
+.meta{color:var(--dim);font-size:12px}
+.stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:12px}
+.stat b{color:var(--txt);font-size:13px;margin-left:4px}
+.tabs{display:flex;gap:4px;margin-top:10px}
+.tab{flex:1;text-align:center;padding:7px 4px;border-radius:8px;background:var(--card);border:1px solid var(--line);color:var(--dim);font-size:13px;cursor:pointer}
+.tab.on{color:var(--bg);background:var(--gold);border-color:var(--gold);font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px}
+table{border-collapse:collapse;font-size:12px;white-space:nowrap;width:100%}
+th{color:var(--dim);font-weight:500;text-align:right;padding:5px 8px;border-bottom:1px solid var(--line)}
+td{text-align:right;padding:6px 8px;border-bottom:1px solid #1e2228}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--card)}
+tr:last-child td{border-bottom:none}
+.pos{color:var(--up)}.neg{color:var(--down)}.hot{color:var(--gold);font-weight:600}
+.empty{color:var(--dim);font-size:12px;padding:6px 0}
+input,select,button,textarea{background:#1e2228;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-size:13px;font-family:inherit}
+button{cursor:pointer}button:active{opacity:.7}
+button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-weight:600}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.pgrp{border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
+.pgrp h3{font-size:12px;color:var(--gold);margin:0 0 8px}
+.p{margin-bottom:10px}.p label{display:block;font-size:13px;margin-bottom:3px}
+.p .d{color:var(--dim);font-size:11px;margin-top:2px}
+.p input{width:110px}
 </style>
-<div id=head>載入中…</div>
-<h2>回測（5m，三十天內）</h2>
-<div><input id=bs placeholder="AIN" value="AIN" style="width:90px"><span class=meta>USDT</span> <input id=bd type=number value=3 style="width:50px"> 天
-<button onclick="bt()">跑</button> <button onclick="dg()">A 診斷</button></div>
-<div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
-<h2>歷史事件掃描（全市場，3 天漲一倍後跌四成，最多 90 天；每個事件回測高點前 10 天～後 5 天，獨立程序執行）</h2>
-<div><input id=sd type=number value=30 style="width:50px"> 天
-<select id=sm style="background:#222;color:#ddd;border:1px solid #444;border-radius:6px;padding:6px"><option value=pump>拉高崩盤事件（3天漲一倍後跌四成，高點前10天～後5天）</option><option value=crash>崩盤日（單日跌30%，不管有沒有拉升，前後2天；去偏差，測 B/C/F）</option><option value=pumpday>暴漲日（單日漲30%，不管後來崩不崩，前後2天；去偏差，測 E/G）</option></select>
-<input id=sl placeholder="這次的標籤（可空）" style="width:140px">
-<button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button> <button onclick="swtoggle()">收合/展開</button> <button onclick="swclear()">清除</button></div>
-<div class=meta style="margin-top:6px">調參：改哪個就填哪個，沒動的用預設（括號內）。<button onclick="pform(true)">全部還原</button> <button onclick="ptoggle()">顯示/隱藏參數</button></div>
-<div id=pform style="display:none"></div>
-<div id=swout class=meta>（尚未執行）</div>
-<div id=live></div>
+<header>
+<h1>PUMP-DUMP HUNTER</h1>
+<div id=hmeta class=meta>載入中…</div>
+<div id=hstats class=stats></div>
+<div class=tabs>
+  <div class="tab on" data-t=watch>監控</div><div class=tab data-t=trade>交易</div><div class=tab data-t=lab>研究</div>
+</div>
+</header>
+<div class=wrap>
+<div id=watch class=pane></div>
+<div id=trade class=pane style=display:none></div>
+<div id=lab class=pane style=display:none>
+  <div class=card><h2>單幣回測（5m，最多 30 天）</h2>
+    <div class=row><input id=bs value="AIN" style="width:85px"><span class=meta>USDT</span>
+      <input id=bd type=number value=3 style="width:55px"><span class=meta>天</span>
+      <button class=go onclick="bt()">跑回測</button><button onclick="dg()">A 診斷</button></div>
+    <div id=btout class=meta>結果會留在這裡，不受自動刷新影響</div>
+  </div>
+  <div class=card><h2>歷史事件掃描（全市場，背景執行）</h2>
+    <div class=row><input id=sd type=number value=90 style="width:55px"><span class=meta>天</span>
+      <select id=sm style="flex:1;min-width:200px">
+        <option value=crash>崩盤日 · 單日跌30% · 測 C/F</option>
+        <option value=pumpday>暴漲日 · 單日漲30% · 測 E/G</option>
+        <option value=pump>拉高崩盤事件 · 3天漲倍後跌四成（對做多有事後偏差）</option>
+      </select></div>
+    <div class=row><input id=sl placeholder="標籤（可空）" style="flex:1;min-width:120px">
+      <button class=go onclick="sw()">開始掃描</button><button onclick="swload()">更新</button>
+      <button onclick="swtoggle()">收合</button><button onclick="swclear()">清除</button></div>
+    <div id=swout class=meta>尚未執行</div>
+  </div>
+  <div class=card><h2>參數調整 <button onclick="ptoggle()" style="font-size:11px;padding:3px 8px">顯示/隱藏</button>
+      <button onclick="pform()" style="font-size:11px;padding:3px 8px">全部還原</button></h2>
+    <div class=meta>改哪個填哪個，沒填的用預設（括號內）。有標引擎名的優先於「全部引擎」。</div>
+    <div id=pform style=display:none></div>
+  </div>
+</div>
+</div>
 <script>
-const T=(rows,cols,cls)=>rows.length?'<div class=wrap><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
-rows.map(r=>'<tr class="'+(cls?cls(r):'')+'">'+cols.map(c=>'<td>'+(r[c]??'')).join('')+'</tr>').join('')+'</table></div>':'<div class=meta>（無）</div>';
-async function load(){const s=await (await fetch('/api/state')).json();const sig=s.signals.slice().reverse();
-document.getElementById('head').innerHTML=`<b>pump-dump-hunter</b>
-<div class=meta>啟動 ${s.started} · 上次掃描 ${s.last_scan||'—'} · 引擎迴圈 ${s.loop?`${s.loop.took}s / ${s.loop.symbols} 檔 @${s.loop.at}`:'—'} · 即時區每 60 秒刷新</div>
-<div class=meta>本金階梯：餘額 ${s.equity&&s.equity.balance!=null?s.equity.balance.toFixed(1)+' U':'（未讀取' + (s.equity&&s.equity.error?'：'+s.equity.error:'') + '）'} → 階梯 <b>${s.equity?s.equity.tier:'—'} U</b> × ${s.equity?(1-s.equity.reserve_pct)*100:''}% = 可用 <b>${s.equity?(s.equity.tier*(1-s.equity.reserve_pct)).toFixed(0):'—'} U</b>（上限 ${s.equity?s.equity.cap:''}，${s.equity?s.equity.leverage:''}x，最多 ${s.equity?s.equity.max_positions:''} 筆，每筆保證金 ≤ ${s.equity?(s.equity.tier*(1-s.equity.reserve_pct)/s.equity.max_positions).toFixed(0):'—'} U）</div>
-<div><span class=pill>本策略持倉 ${Object.keys(s.open||{}).length}</span><span class=pill>擁擠名單 ${s.watch.length}</span><span class=pill>觀察 ${s.observe.length}</span><span class=pill>訊號 ${s.signals.length}</span><span class=pill>已下單 ${s.trades.length}</span></div>`;
-document.getElementById('live').innerHTML=`
-<h2>擁擠名單（引擎正在盯）</h2>${T(s.watch,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'])}
-<h2>本策略持倉（${Object.keys(s.open||{}).length}）</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty'])}
-<h2>已平倉（最新在上）</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','time','entry','fill','stop','qty'])}
-<h2>訊號（最新在上） <button onclick="sigclear()" style="font-size:12px;padding:3px 8px">清除訊號紀錄</button></h2>${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','equity','margin','notional','executed','skipped','reason'],r=>r.side=='LONG'?'long':'short')}
-<h2>觀察名單（24h 漲幅前 60，依熱度排；主流幣已排除）</h2><div class=meta>score = g/d/o/f 四項各 1 分，≥3 進擁擠名單 · hits: g=48h漲幅 d=偏離MA20 o=OI增幅 f=資金費率 💥=24h跌超30% 🔥=24h漲超40%（兩者都直接進引擎監控） · 百分比單位</div>
-${T(s.observe,['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'],r=>r.score>=3?'hot':r.score==2?'warm':'')}
-<h2>錯誤</h2><div class=meta>${s.errors.slice(-10).reverse().join('<br>')||'（無）'}</div>`}
-async function bt(){const o=document.getElementById('btout');o.innerHTML='跑中…';
-const s=document.getElementById('bs').value,d=document.getElementById('bd').value;
-const r=await (await fetch('/api/backtest?s='+s+'&d='+d)).json();
-if(r.error){o.innerHTML='錯誤: '+r.error;return}
-o.innerHTML=`${r.symbol} ${r.bars} 根<br>`+T(r.summary,['engine','n','win','exp','pf','best','worst'])+'<br>'+
-T(r.trades.slice().reverse(),['time','engine','side','entry','exit','r','reason','bars'],x=>x.r>0?'long':'short')}
-async function dg(){const o=document.getElementById('btout');o.innerHTML='診斷中…';
-const s=document.getElementById('bs').value,d=document.getElementById('bd').value;
-const r=await (await fetch('/api/diag?s='+s+'&d='+d)).json();
-if(r.error){o.innerHTML='錯誤: '+r.error;return}
-const c=r.counts;o.innerHTML=`${r.symbol} ${c.bars} 根 · 成立次數：hot ${c.hot} · pivot ${c.pivot} · top ${c.top} · vol ${c.vol} · (div ${c.div}，參考) · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>跌破中樞的棒（最近 40 根，UTC）：<br>`+
-T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','pivot','top','vol','div','fire'],x=>x.fire=='✅'?'long':'')}
-async function sigclear(){if(!confirm('清除訊號紀錄？（已下單紀錄保留）'))return;await fetch('/api/signals/clear');load()}
+const $=id=>document.getElementById(id);
+const num=v=>typeof v==='number'?v:null;
+function T(rows,cols,cls){if(!rows||!rows.length)return '<div class=empty>（無）</div>';
+ return '<div class=scroll><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
+ rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v===undefined||v===null)v='';
+   let k='';if(typeof v==='number'){if(c==='r'||c[0]==='R'&&c.length<4||c==='total')k=v>0?'pos':v<0?'neg':''}
+   return '<td class="'+k+'">'+v}).join('')+'</tr>').join('')+'</table></div>'}
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));
+  document.querySelectorAll('.pane').forEach(p=>p.style.display=p.id===t.dataset.t?'':'none')});
+
+async function load(){const s=await (await fetch('/api/state')).json();
+ const e=s.equity||{},L=s.loop;
+ $('hmeta').innerHTML=`啟動 ${s.started||'—'} · 掃描 ${s.last_scan||'—'} · 迴圈 ${L?L.took+'s / '+L.symbols+' 檔':'—'}`;
+ $('hstats').innerHTML=[
+   ['持倉',Object.keys(s.open||{}).length],['擁擠',s.watch.length],['觀察',s.observe.length],
+   ['訊號',s.signals.length],['已下單',s.trades.length],
+   ['可用',e.tier?Math.round(e.tier*(1-e.reserve_pct))+' U':'—']
+ ].map(([k,v])=>`<span class=stat>${k}<b>${v}</b></span>`).join('');
+ const hits=r=>r.hits||'';
+ const wcols=['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'];
+ $('watch').innerHTML=`
+ <div class=card><h2>擁擠名單 · 引擎正在盯</h2>${T(s.watch,wcols,1)}</div>
+ <div class=card><h2>觀察名單 · 24h 漲幅前 ${s.observe.length}</h2>
+   <div class=meta style=margin-bottom:8px>score = g/d/o/f 四項各 1 分 · g=48h漲幅 d=偏離MA20 o=OI增幅 f=資金費率 · 💥=24h跌超30% 🔥=24h漲超門檻（都直接進引擎）· 單位 %</div>
+   ${T(s.observe,wcols)}</div>
+ <div class=card><h2>錯誤與警告</h2><div class=meta>${(s.errors||[]).slice(-8).reverse().join('<br>')||'（無）'}</div></div>`;
+ const sig=s.signals.slice().reverse();
+ $('trade').innerHTML=`
+ <div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty'])}</div>
+ <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','entry','fill','stop','qty'])}</div>
+ <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
+   ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','reason'])}</div>`}
+
+async function bt(){const o=$('btout');o.innerHTML='跑中…';
+ const r=await (await fetch('/api/backtest?s='+$('bs').value+'&d='+$('bd').value)).json();
+ if(r.error){o.innerHTML='錯誤: '+r.error;return}
+ o.innerHTML=`<b>${r.symbol}</b> ${r.bars} 根<br>`+T(r.summary,['engine','n','win','exp','pf','best','worst'])+'<br>'+
+  T(r.trades.slice().reverse(),['time','engine','side','entry','exit','r','reason','bars'])}
+async function dg(){const o=$('btout');o.innerHTML='診斷中…';
+ const r=await (await fetch('/api/diag?s='+$('bs').value+'&d='+$('bd').value)).json();
+ if(r.error){o.innerHTML='錯誤: '+r.error;return}const c=r.counts;
+ o.innerHTML=`<b>${r.symbol}</b> ${c.bars} 根 · hot ${c.hot} · pivot ${c.pivot} · top ${c.top} · vol ${c.vol} · first ${c.first} · (div ${c.div}) · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>`+
+  T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','pivot','top','vol','first','fire'])}
+
 let swOpen=true;function swtoggle(){swOpen=!swOpen;swload()}
-let PS=[];function ptoggle(){const p=document.getElementById('pform');p.style.display=p.style.display=='none'?'block':'none'}
-async function pform(reset){if(!PS.length)PS=await (await fetch('/api/params')).json();
-let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+='<h2 style="font-size:13px;color:#fc6">'+g+'</h2>'}
-h+=`<div style="margin:4px 0 8px"><b>${s.label}</b> <span class=meta>(${s.default}${s.unit?' '+s.unit:''})</span>
-<input class=pv data-k="${s.k}" type=number step="${s.step}" placeholder="${s.default}" style="width:90px;margin-left:6px"><br><span class=meta>${s.help}</span></div>`}
-document.getElementById('pform').innerHTML=h}
-function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
 async function swclear(){if(!confirm('清除掃描結果？（K 線快取保留）'))return;await fetch('/api/sweep/clear');swload()}
-async function sw(){const o=pcollect();const lbl=document.getElementById('sl').value||Object.entries(o).map(([k,v])=>k.split('.').slice(-2).join('.')+'='+v).join(' ')||'預設';
-const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&m='+document.getElementById('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
-if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
-async function swload(){const o=document.getElementById('swout');const r=await (await fetch('/api/sweep')).json();
-if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G']):'');return}
-let h='<b>'+r.status+'</b>';
-if(r.runs&&r.runs.length)h+='<br>歷次比較（total=全部 R 合計）：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G'],x=>x.total>0?'long':'');
-if(!swOpen){o.innerHTML=h+'<br>（已收合）';return}
-if(r.summary&&r.summary.length)h+='<br>各引擎彙整：'+T(r.summary,['engine','n','win','exp','pf','best','worst']);
-if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的合計 R）：'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E','R_F','R_G'],x=>['R_A','R_B','R_C','R_D','R_E','R_F','R_G'].some(k=>x[k]>0)?'long':'');
-else if(r.events&&r.events.length)h+='<br>事件：'+T(r.events,['symbol','peak_day','pump','dump']);
-if(r.trades&&r.trades.length)h+='<br>最大單筆（|R| 前 60）：'+T(r.trades,['symbol','time','engine','side','entry','exit','r','reason'],x=>x.r>0?'long':'short');
-o.innerHTML=h;if(r.status&&!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}
-load();swload();pform();setInterval(load,60000);</script>"""
+async function sw(){const o=pcollect();
+ const lbl=$('sl').value||Object.entries(o).map(([k,v])=>k.split('.').slice(-2).join('.')+'='+v).join(' ')||'預設';
+ const r=await (await fetch('/api/sweep/start?d='+$('sd').value+'&m='+$('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
+ if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
+async function swload(){const o=$('swout');const r=await (await fetch('/api/sweep')).json();
+ const runs=r.runs&&r.runs.length?'<h2 style=margin-top:10px>歷次比較</h2>'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G']):'';
+ if(!r.status){o.innerHTML='尚未執行'+runs;return}
+ let h='<b>'+r.status+'</b>'+runs;
+ if(swOpen){
+  if(r.summary&&r.summary.length)h+='<h2 style=margin-top:10px>各引擎彙整</h2>'+T(r.summary,['engine','n','win','exp','pf','best','worst']);
+  if(r.results&&r.results.length)h+='<h2 style=margin-top:10px>每檔事件</h2>'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E','R_F','R_G']);
+  if(r.trades&&r.trades.length)h+='<h2 style=margin-top:10px>最大單筆</h2>'+T(r.trades,['symbol','time','engine','side','entry','exit','r','reason']);
+ }else h+='<div class=meta>（明細已收合）</div>';
+ o.innerHTML=h;
+ if(!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}
+
+let PS=[];function ptoggle(){const p=$('pform');p.style.display=p.style.display=='none'?'':'none';if(!PS.length)pform()}
+async function pform(){if(!PS.length)PS=await (await fetch('/api/params')).json();
+ let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+=(h?'</div>':'')+'<div class=pgrp><h3>'+g+'</h3>'}
+  h+=`<div class=p><label>${s.label} <span class=meta>(${s.default}${s.unit?' '+s.unit:''})</span></label>
+   <input class=pv data-k="${s.k}" type=number step="${s.step}" placeholder="${s.default}"><div class=d>${s.help}</div></div>`}
+ $('pform').innerHTML=h+'</div>'}
+function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
+async function sigclear(){if(!confirm('清除訊號紀錄？（已下單紀錄保留）'))return;await fetch('/api/signals/clear');load()}
+load();swload();setInterval(load,60000);</script>"""
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
