@@ -74,6 +74,18 @@ ENGINE_F = dict(  # 崩盤進行中順勢追空（1m K 線）：抓清算連鎖�
     min_gain_24h=0.40,       # 進場當下 24h 內從低點漲幅 >= 40% 才做（跟實盤名單門檻一致；拉升初期的洗盤不追）
 )
 
+ENGINE_G = dict(  # 暴漲進行中順勢追多（1m）：軋空剛啟動的前幾分鐘，F 的鏡像
+    window=15,               # 看最近 15 根 1m
+    rise=0.10,               # 15 分鐘內從低到現在漲 >= 10%
+    green_bars=3,            # 最近 N 根全部收紅（上漲）
+    vol_mult=4.0,            # 最近 3 根平均量 >= 4x MAVOL20
+    stop_bars=5,             # 止損放最近 5 根 1m 低點
+    min_stop=0.03,
+    gain24_min=0.15,         # 24h 漲幅下限：已經動起來
+    gain24_max=0.60,         # 上限：超過就是追最後一棒（做多跟做空的不對稱處）
+    max_funding=0.0015,      # 資金費率已經 >0.15%/8h 代表多頭擠爆，不追
+)
+
 # 各引擎出場覆蓋（沒寫的用 RISK 預設）
 # 各引擎出場/風險覆蓋（risk_pct = 每筆風險佔本金；2026-09-16 崩盤日回測：C PF5.7 主力，B/F PF~1.1-1.3 收數據用）
 EXIT = dict(
@@ -83,6 +95,8 @@ EXIT = dict(
     D=dict(max_hold_bars=24, trail_after_r=1.5, trail_bars=3, cooldown_bars=48),
     E=dict(max_hold_bars=288, trail_after_r=2.0, trail_bars=12, cooldown_bars=288),  # 一天最多一次
     F=dict(tp1_r=None, be_r=1.0, trail_after_r=1.5, trail_bars=3, max_hold_bars=60, cooldown_bars=30,
+           min_stop_pct=0.03, risk_pct=0.01),
+    G=dict(tp1_r=None, be_r=1.0, trail_after_r=1.5, trail_bars=3, max_hold_bars=60, cooldown_bars=30,
            min_stop_pct=0.03, risk_pct=0.01),   # 1m 引擎：不減碼、1R 保本、1.5R 起 3 根高點追蹤、最多 60 分鐘
 )
 
@@ -119,7 +133,7 @@ RISK = dict(
 def apply_overrides(o):
     """回測/掃描用：以 dict 覆蓋參數，回傳還原用的快照。格式 {"ENGINE_A": {...}, "EXIT": {"A": {...}}, "RISK": {...}}"""
     import copy
-    snap = {k: copy.deepcopy(globals()[k]) for k in ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "ENGINE_F", "EXIT", "RISK")}
+    snap = {k: copy.deepcopy(globals()[k]) for k in ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "ENGINE_F", "ENGINE_G", "EXIT", "RISK")}
     for k, v in (o or {}).items():
         if k not in snap or not isinstance(v, dict): continue
         if k == "EXIT":

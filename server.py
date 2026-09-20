@@ -148,12 +148,12 @@ async function sw(){const o=pcollect();const lbl=document.getElementById('sl').v
 const r=await (await fetch('/api/sweep/start?d='+document.getElementById('sd').value+'&m='+document.getElementById('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
 if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
 async function swload(){const o=document.getElementById('swout');const r=await (await fetch('/api/sweep')).json();
-if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F']):'');return}
+if(!r.status){o.innerHTML='（尚未執行）'+(r.runs&&r.runs.length?'<br>歷次比較：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G']):'');return}
 let h='<b>'+r.status+'</b>';
-if(r.runs&&r.runs.length)h+='<br>歷次比較（total=全部 R 合計）：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F'],x=>x.total>0?'long':'');
+if(r.runs&&r.runs.length)h+='<br>歷次比較（total=全部 R 合計）：'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G'],x=>x.total>0?'long':'');
 if(!swOpen){o.innerHTML=h+'<br>（已收合）';return}
 if(r.summary&&r.summary.length)h+='<br>各引擎彙整：'+T(r.summary,['engine','n','win','exp','pf','best','worst']);
-if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的合計 R）：'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E','R_F'],x=>['R_A','R_B','R_C','R_D','R_E','R_F'].some(k=>x[k]>0)?'long':'');
+if(r.results&&r.results.length)h+='<br>每檔事件（R 為該引擎在該幣的合計 R）：'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E','R_F','R_G'],x=>['R_A','R_B','R_C','R_D','R_E','R_F','R_G'].some(k=>x[k]>0)?'long':'');
 else if(r.events&&r.events.length)h+='<br>事件：'+T(r.events,['symbol','peak_day','pump','dump']);
 if(r.trades&&r.trades.length)h+='<br>最大單筆（|R| 前 60）：'+T(r.trades,['symbol','time','engine','side','entry','exit','r','reason'],x=>x.r>0?'long':'short');
 o.innerHTML=h;if(r.status&&!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}

@@ -64,6 +64,14 @@ SCHEMA = [
   dict(g="每引擎風險（每筆賠本金幾 %）", k="EXIT.B.risk_pct", label="B 每筆風險", unit="", step=0.005, help="0.01 = 1%。B 三次回測 PF 1.1–1.2，收數據用"),
   dict(g="每引擎風險（每筆賠本金幾 %）", k="EXIT.C.risk_pct", label="C 每筆風險", unit="", step=0.005, help="0.02 = 2%。C 崩盤日模式 PF 5.7，主力"),
   dict(g="每引擎風險（每筆賠本金幾 %）", k="EXIT.F.risk_pct", label="F 每筆風險", unit="", step=0.005, help="0.01 = 1%。F 崩盤日模式 PF 1.32，邊際薄"),
+  # ---- G ----
+  dict(g="G 暴漲進行中追多（1m，軋空）", k="ENGINE_G.rise", label="15分鐘漲幅", unit="", step=0.02,
+       help="最近 15 根 1m 從低到現在至少漲幾 %（0.10）。調小：更早進但假訊號多"),
+  dict(g="G 暴漲進行中追多（1m，軋空）", k="ENGINE_G.vol_mult", label="放量倍數", unit="×MAVOL", step=1, help="最近 3 根 1m 平均量要是均量幾倍（4）"),
+  dict(g="G 暴漲進行中追多（1m，軋空）", k="ENGINE_G.gain24_max", label="24h 漲幅上限", unit="", step=0.1,
+       help="24h 已經漲超過幾 %（0.6）就不追，避免追最後一棒。做多跟做空的最大不對稱處"),
+  dict(g="G 暴漲進行中追多（1m，軋空）", k="ENGINE_G.gain24_min", label="24h 漲幅下限", unit="", step=0.05, help="至少已經漲幾 %（0.15）才算動起來"),
+  dict(g="G 暴漲進行中追多（1m，軋空）", k="EXIT.G.max_hold_bars", label="最長持有", unit="分鐘", step=15, help="超過就平倉（60）"),
   # ---- 出場/風控 ----
   dict(g="出場與風控（全部引擎）", k="RISK.tp1_r",   label="1R 出一半", unit="R", step=0.5,
        help="到幾 R 先出一半並移止損到成本（1）。A 引擎固定不減碼，不受此影響"),

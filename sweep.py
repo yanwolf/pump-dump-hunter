@@ -112,7 +112,7 @@ def main():
                 allt += tr
                 by = {}
                 for t in tr: by[t["engine"]] = round(by.get(t["engine"], 0) + t["r"], 2)
-                results.append(dict(**ev, bars=len(k), trades=len(tr), **{f"R_{e}": by.get(e) for e in "ABCDEF"}))
+                results.append(dict(**ev, bars=len(k), trades=len(tr), **{f"R_{e}": by.get(e) for e in "ABCDEFG"}))
             except Exception as e:
                 results.append(dict(**ev, error=str(e)))
         summ = backtest.summary(allt)

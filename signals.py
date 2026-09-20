@@ -246,6 +246,27 @@ def engine_f(k, i):
     stop = max(stop, bar["c"] * (1 + P["min_stop"]))
     return Signal("F", "SHORT", bar["c"], stop, f"15m跌{1 - bar['c'] / hi:.0%} 連黑放量，清算連鎖追空")
 
-ENGINES = {"A": engine_a, "B": engine_b, "C": engine_c, "D": engine_d, "E": engine_e, "F": engine_f}
-LONG_ENGINES = {"D", "E"}
-ENGINE_TF = {"F": "1m"}          # 沒列的都是 5m
+# ---------- G：暴漲進行中順勢追多（1m，軋空）----------
+def engine_g(k, i, funding=None):
+    P = C.ENGINE_G
+    if i < 40: return None
+    win = k[:i + 1]
+    day = win[-min(1440, i):]
+    lo24, hi24 = min(x["l"] for x in day), max(x["h"] for x in day)
+    if lo24 <= 0: return None
+    gain24 = hi24 / lo24 - 1
+    if not (P["gain24_min"] <= gain24 <= P["gain24_max"]): return None   # 沒動 或 已經瘋掉
+    if funding is not None and funding > P["max_funding"]: return None   # 多頭已擠爆，不追
+    seg = win[-P["window"]:]
+    lo = min(x["l"] for x in seg); bar = win[-1]
+    if lo <= 0 or bar["c"] / lo - 1 < P["rise"]: return None
+    if any(x["c"] <= x["o"] for x in win[-P["green_bars"]:]): return None
+    mavol = sum(x["v"] for x in win[-23:-3]) / 20
+    if mavol <= 0 or sum(x["v"] for x in win[-3:]) / 3 < P["vol_mult"] * mavol: return None
+    stop = min(x["l"] for x in win[-P["stop_bars"]:])
+    stop = min(stop, bar["c"] * (1 - P["min_stop"]))
+    return Signal("G", "LONG", bar["c"], stop, f"15m漲{bar['c'] / lo - 1:.0%} 連紅放量，軋空追多")
+
+ENGINES = {"A": engine_a, "B": engine_b, "C": engine_c, "D": engine_d, "E": engine_e, "F": engine_f, "G": engine_g}
+LONG_ENGINES = {"D", "E", "G"}
+ENGINE_TF = {"F": "1m", "G": "1m"}          # 沒列的都是 5m
