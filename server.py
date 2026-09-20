@@ -9,9 +9,12 @@ TRADE = os.environ.get("TRADE", "0") == "1"
 STOP_FAIL_CLOSE = os.environ.get("STOP_FAIL", "close") == "close"   # 停損單掛不上時：close=立刻平倉 keep=只告警          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
 SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 
-def reconcile():
+_rc = dict(t=0, n=0, ex=[])
+
+def reconcile(force=False):
     """跟交易所對帳：自己開的倉不在了 → 標記平倉；下單當下掛掉、沒記到帳的倉 → 認領回來。
     回傳 (自己還在場的倉數, 交易所全部持倉)。"""
+    if not force and time.time() - _rc["t"] < 20: return _rc["n"], _rc["ex"]   # 20 秒內重用，positionRisk 權重高，打太兇會被 418
     st = store.get()
     own, pend = st.get("open", {}), dict(st.get("pending", {}))
     if not C.API_KEY: return 0, []
@@ -35,6 +38,7 @@ def reconcile():
     store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
                                 upnl=round(float(p.get("unRealizedProfit") or 0), 2),
                                 owner="本策略" if p["symbol"] in still else "其他") for p in ex])
+    _rc.update(t=time.time(), n=len(still), ex=ex)
     return len(still), ex
 
 def place(sym, eid, sig, sz, rec):
@@ -115,7 +119,7 @@ def loop():
                     if not sz: continue                      # 止損距離超過上限，略過
                     rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False)
                     if TRADE and C.API_KEY:
-                        n_own, ex = reconcile()
+                        n_own, ex = reconcile(force=True)   # 要下單了，用最新的
                         mine = store.get().get("open", {})
                         if s in mine:
                             rec["skipped"] = f"本策略已持有此幣（引擎{mine[s].get('engine')}）"
@@ -141,6 +145,32 @@ def loop():
         except Exception as e:
             store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
         time.sleep(max(1, POLL_SEC - (time.time() - t0 if "t0" in dir() else 0)))
+
+def manage(act, sym, eid="?", stop=None):
+    """手動處理帳號裡的孤兒倉（修正前留下的、或別的原因沒記到帳的）。"""
+    pos = next((p for p in B.open_positions() if p["symbol"] == sym), None)
+    if not pos: return dict(error=f"{sym} 帳號內沒有持倉")
+    amt = float(pos["positionAmt"]); is_long = amt > 0; qty = abs(amt)
+    entry = float(pos["entryPrice"])
+    own = dict(store.get().get("open", {}))
+    if act == "close":
+        B.market_order(sym, "SELL" if is_long else "BUY", qty, reduce_only=True)
+        rec = own.pop(sym, None) or dict(engine=eid, side="LONG" if is_long else "SHORT", entry=entry, qty=qty)
+        store.update(open=own); store.push("closed", dict(rec, closed=time.strftime("%m-%d %H:%M"), by="手動"))
+        telegram.send(f"🏁 手動平倉 {sym}")
+        return dict(ok=True, msg=f"{sym} 已平倉")
+    if act == "adopt":
+        if not stop: return dict(error="請填停損價")
+        stop = float(stop)
+        if (is_long and stop >= entry) or (not is_long and stop <= entry):
+            return dict(error=f"停損價方向不對（{'多' if is_long else '空'}單進場 {entry}）")
+        B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)
+        own[sym] = dict(engine=eid, side="LONG" if is_long else "SHORT", time=time.strftime("%m-%d %H:%M"),
+                        entry=entry, fill=entry, stop=stop, qty=qty, adopted=True)
+        store.update(open=own)
+        telegram.send(f"♻️ 手動認領 {sym} 引擎{eid}，已補掛停損 {stop}")
+        return dict(ok=True, msg=f"{sym} 已認領並補掛停損 {stop}")
+    return dict(error="未知動作")
 
 def norm_symbol(s):
     """AIN / ain / AINUSDT / ain/usdt 都變 AINUSDT；全是 U 本位。"""
@@ -263,7 +293,13 @@ async function load(){let s;try{s=await (await fetch('/api/state')).json()}catch
  $('trade').innerHTML=`
  <div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty','adopted'])}</div>
  <div class=card><h2>帳號全部持倉 · 對帳用</h2>
-   <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）</div>
+   <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）。
+     如果確定某筆是本策略漏記的孤兒倉，用下面的欄位認領回來（會順便補掛停損），或直接平掉。</div>
+   <div class=row>
+     <input id=mx placeholder=幣別 style="width:90px"><input id=me placeholder=引擎 style="width:55px">
+     <input id=ms placeholder=停損價 style="width:95px">
+     <button class=go onclick="madopt()">認領+補停損</button><button onclick="mclose()">平倉</button></div>
+   <div id=mout class=meta style=margin-bottom:8px></div>
    ${T(s.exchange||[],['symbol','owner','amt','entry','upnl'])}</div>
  <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','entry','fill','stop','qty'])}</div>
  <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
@@ -321,6 +357,12 @@ async function pform(){if(!PS.length)PS=await (await fetch('/api/params')).json(
    <input class=pv data-k="${s.k}" type=number step="${s.step}" placeholder="${s.default}"><div class=d>${s.help}</div></div>`}
  $('pform').innerHTML=h+'</div>'}
 function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
+async function mpos(act){const o=$('mout');const sym=$('mx').value.trim();if(!sym){o.innerHTML='請填幣別';return}
+ if(!confirm((act=='close'?'平倉 ':'認領 ')+sym+'？'))return;o.innerHTML='處理中…';
+ const r=await (await fetch('/api/pos?act='+act+'&s='+encodeURIComponent(sym)+'&e='+encodeURIComponent($('me').value||'?')+'&stop='+encodeURIComponent($('ms').value||''))).json();
+ o.innerHTML=r.error?'<span style=color:var(--down)>'+r.error+'</span>':r.msg;load()}
+function madopt(){mpos('adopt')}
+function mclose(){mpos('close')}
 async function sigclear(){if(!confirm('清除訊號紀錄？（已下單紀錄保留）'))return;await fetch('/api/signals/clear');load()}
 load();swload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>"""
 
@@ -361,6 +403,13 @@ class H(BaseHTTPRequestHandler):
                 telegram.send(f"⚙️ 實盤參數覆蓋更新：{len(form)} 項" if form else "⚙️ 實盤參數覆蓋已清空，回到預設")
             body = json.dumps(dict(presets=presets.all_presets(), live=presets.live()), ensure_ascii=False).encode()
             ct = "application/json; charset=utf-8"
+        elif self.path.startswith("/api/pos"):
+            import urllib.parse
+            q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
+            try: res = manage(q.get("act", [""])[0], norm_symbol(q.get("s", [""])[0]),
+                              q.get("e", ["?"])[0], q.get("stop", [""])[0] or None)
+            except Exception as e: res = dict(error=str(e))
+            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/params"):
             body, ct = json.dumps(params.schema(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep/clear"):
