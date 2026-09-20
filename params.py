@@ -3,6 +3,11 @@
 import config as C
 
 SCHEMA = [
+  dict(g="掃描與監控名單", k="SCAN.watch_chg24", label="進引擎的漲幅門檻", unit="%", step=5,
+       help="24h 漲幅超過幾 % 就進引擎監控（40）。調低：抓得更早、G 的機會變多，但名單變長、迴圈變慢"),
+  dict(g="掃描與監控名單", k="SCAN.max_watch", label="監控名單上限", unit="檔", step=5,
+       help="每檔每分鐘 2 個請求（5m+1m），40 檔約 20 秒。超過 60 秒就會漏 K 線"),
+  dict(g="掃描與監控名單", k="SCAN.top_n", label="觀察名單檔數", unit="檔", step=10, help="24h 漲幅前 N 檔算熱度（60），只影響 30 分鐘一次的掃描"),
   # ---- A 崩前 ----
   dict(g="A 崩前（頂部中樞跌破做空）", k="ENGINE_A.pivot_bars",   label="中樞長度", unit="根5m", step=6,
        help="頂部盤整要看幾根 K（36=3小時）。調大：只抓磨得久的頂，訊號少；調小：小盤整也算，訊號多"),

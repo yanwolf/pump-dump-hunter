@@ -45,6 +45,7 @@ def scan(verbose=True):
             if verbose: print(s, "skip:", e)
     observe.sort(key=lambda r: (-r["score"], -r["ma20_dev"]))
     watch = [r for r in observe if r["score"] >= P["min_score"] or r["symbol"] in crashed or r["chg24"] >= P["watch_chg24"]]
+    watch = watch[:P.get("max_watch", 40)]      # 已依熱度排序，取前 N 檔
     return watch, observe
 
 def why(symbol):

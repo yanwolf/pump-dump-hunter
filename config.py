@@ -11,6 +11,7 @@ API_SECRET = os.environ.get("BINANCE_SECRET", "")
 SCAN = dict(
     top_n=60,                # 先取 24h 漲幅前 N 檔算細項（觀察名單）
     watch_chg24=40.0,        # 24h 漲幅 >= 40% 的一律進引擎監控（崩後引擎只在崩時開槍，多盯不多訊號）
+    max_watch=40,            # 引擎監控名單上限：每檔每分鐘 2 個請求，超過迴圈會跑不完一分鐘
     exclude=("BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK", "DOT", "LTC", "BCH",
              "TON", "SUI", "XLM", "HBAR", "SHIB", "NEAR", "APT", "ARB", "OP", "UNI", "AAVE", "ATOM", "ETC", "FIL"),
     min_gain_48h=0.5,        # 48h 漲幅 >= 50%

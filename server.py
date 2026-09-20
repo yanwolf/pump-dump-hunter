@@ -37,8 +37,9 @@ def loop():
             if TRADE and C.API_KEY:
                 try: reconcile()
                 except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} reconcile {e}")
+            t0 = time.time()
             for s in list(watch):
-                k = B.klines(s, "5m", 300)
+                k = B.klines(s, "5m", 150)      # 引擎最多回看 ~60 根，150 夠用且省一半傳輸
                 k1m = B.klines(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
                 for eid in ENABLED:
                     kk = k1m if ENGINE_TF.get(eid) == "1m" else k
@@ -73,9 +74,15 @@ def loop():
                     telegram.send(f"{'✅下單' if rec['executed'] else '👀訊號'} {s} 引擎{eid} {'多' if sig.side == 'LONG' else '空'} @{sig.entry:.5g} "
                                   f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U" + (f" 成交{rec['fill']:.5g} 滑價{rec['slip_pct']}%" if rec.get("fill") else "") + f"\n{sig.reason}")
                     break
+            took = round(time.time() - t0, 1)
+            store.update(loop=dict(took=took, symbols=len(watch), at=time.strftime("%H:%M:%S")))
+            if took > POLL_SEC * 0.7:
+                msg = f"⚠️ 引擎迴圈 {took}s / {len(watch)} 檔，接近輪詢間隔 {POLL_SEC}s，可能漏 K 線"
+                store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
+                if took > POLL_SEC: telegram.send(msg)
         except Exception as e:
             store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
-        time.sleep(POLL_SEC)
+        time.sleep(max(1, POLL_SEC - (time.time() - t0 if "t0" in dir() else 0)))
 
 def norm_symbol(s):
     """AIN / ain / AINUSDT / ain/usdt 都變 AINUSDT；全是 U 本位。"""
@@ -111,7 +118,7 @@ const T=(rows,cols,cls)=>rows.length?'<div class=wrap><table><tr>'+cols.map(c=>'
 rows.map(r=>'<tr class="'+(cls?cls(r):'')+'">'+cols.map(c=>'<td>'+(r[c]??'')).join('')+'</tr>').join('')+'</table></div>':'<div class=meta>（無）</div>';
 async function load(){const s=await (await fetch('/api/state')).json();const sig=s.signals.slice().reverse();
 document.getElementById('head').innerHTML=`<b>pump-dump-hunter</b>
-<div class=meta>啟動 ${s.started} · 上次掃描 ${s.last_scan||'—'} · 即時區每 60 秒刷新</div>
+<div class=meta>啟動 ${s.started} · 上次掃描 ${s.last_scan||'—'} · 引擎迴圈 ${s.loop?`${s.loop.took}s / ${s.loop.symbols} 檔 @${s.loop.at}`:'—'} · 即時區每 60 秒刷新</div>
 <div class=meta>本金階梯：餘額 ${s.equity&&s.equity.balance!=null?s.equity.balance.toFixed(1)+' U':'（未讀取' + (s.equity&&s.equity.error?'：'+s.equity.error:'') + '）'} → 階梯 <b>${s.equity?s.equity.tier:'—'} U</b> × ${s.equity?(1-s.equity.reserve_pct)*100:''}% = 可用 <b>${s.equity?(s.equity.tier*(1-s.equity.reserve_pct)).toFixed(0):'—'} U</b>（上限 ${s.equity?s.equity.cap:''}，${s.equity?s.equity.leverage:''}x，最多 ${s.equity?s.equity.max_positions:''} 筆，每筆保證金 ≤ ${s.equity?(s.equity.tier*(1-s.equity.reserve_pct)/s.equity.max_positions).toFixed(0):'—'} U）</div>
 <div><span class=pill>本策略持倉 ${Object.keys(s.open||{}).length}</span><span class=pill>擁擠名單 ${s.watch.length}</span><span class=pill>觀察 ${s.observe.length}</span><span class=pill>訊號 ${s.signals.length}</span><span class=pill>已下單 ${s.trades.length}</span></div>`;
 document.getElementById('live').innerHTML=`
