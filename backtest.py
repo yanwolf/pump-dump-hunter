@@ -79,7 +79,7 @@ def run(symbol, days):
     end = int(time.time() * 1000); k = B.klines_range(symbol, "5m", end - days * 86400000, end)
     k1m = B.klines_range(symbol, "1m", end - min(days, 7) * 86400000, end)   # 1m 只抓最近 7 天
     tr = simulate_each(k, k1m)
-    for t in tr: t["time"] = time.strftime("%m-%d %H:%M", time.gmtime(t["t"] / 1000)) + " UTC"
+    for t in tr: t["time"] = time.strftime("%m-%d %H:%M", time.localtime(t["t"] / 1000))
     return dict(symbol=symbol, days=days, bars=len(k), trades=tr, summary=summary(tr))
 
 def diag_a(symbol, days):
@@ -94,7 +94,7 @@ def diag_a(symbol, days):
         if f["brk"]:
             ok = all(f[x] for x in need)
             cnt["all"] += ok
-            rows.append(dict(time=time.strftime("%m-%d %H:%M", time.gmtime(k[i]["t"] / 1000)),
+            rows.append(dict(time=time.strftime("%m-%d %H:%M", time.localtime(k[i]["t"] / 1000)),
                              close=k[i]["c"], zd=f["zd"], zg=f["zg"], width=f["width"],
                              hot=f["hot"], pivot=f["pivot"], top=f["top"], vol=f["vol"], first=f["first"], div=f["div"],
                              fire="✅" if ok else "缺:" + ",".join(x for x in need if not f[x])))

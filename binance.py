@@ -107,6 +107,10 @@ def round_qty(symbol, qty):
 def round_price(symbol, price):
     return _fmt(price, filters(symbol)["tick"], down=False)
 
+def user_trades(symbol, limit=50):
+    """最近成交明細（含 realizedPnl、commission），平倉後拿實際出場價用。"""
+    return _get("/fapi/v1/userTrades", dict(symbol=symbol, limit=limit), signed=True)
+
 # ---- 下單（testnet / live 由 USE_TESTNET 決定）----
 def position_mode_hedge():
     return _get("/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"]

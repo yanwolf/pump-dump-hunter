@@ -134,7 +134,7 @@ def main():
                 k = _cached(f"{ev['symbol']}_5m_{ev['peak_ts']}_{mode}", lambda: B.klines_range(ev["symbol"], "5m", a, b))
                 k1m = _cached(f"{ev['symbol']}_1m_{ev['peak_ts']}", lambda: B.klines_range(ev["symbol"], "1m", ev["peak_ts"] - 86400000, ev["peak_ts"] + 2 * 86400000))
                 tr = backtest.simulate_each(k, k1m)
-                for t in tr: t["symbol"] = ev["symbol"]; t["time"] = time.strftime("%m-%d %H:%M", time.gmtime(t["t"] / 1000))
+                for t in tr: t["symbol"] = ev["symbol"]; t["time"] = time.strftime("%m-%d %H:%M", time.localtime(t["t"] / 1000))
                 allt += tr
                 by = {}
                 for t in tr: by[t["engine"]] = round(by.get(t["engine"], 0) + t["r"], 2)

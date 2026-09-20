@@ -1,12 +1,16 @@
 """Zeabur 入口：HTTP 狀態頁 + 背景 paper/live 迴圈。"""
-import json, os, threading, time, traceback
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import os, time
+os.environ["TZ"] = os.environ.get("APP_TZ", "CST-8")   # 台灣 UTC+8、無夏令時間；POSIX 寫法不需要 tzdata
+time.tzset()
+import base64, hmac, json, threading, traceback
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params, presets
 from signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
 TRADE = os.environ.get("TRADE", "0") == "1"
-STOP_FAIL_CLOSE = os.environ.get("STOP_FAIL", "close") == "close"   # 停損單掛不上時：close=立刻平倉 keep=只告警          # 0=只通知 1=真的下單（testnet/live 看 USE_TESTNET）
+STOP_FAIL_CLOSE = os.environ.get("STOP_FAIL", "close") == "close"   # 停損單掛不上時：close=立刻平倉 keep=只告警
+PASSWORD = os.environ.get("DASH_PASSWORD", "")                        # 網頁密碼；沒設定時手動操作全部停用
 SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 
 _rc = dict(t=0, n=0, ex=[])
@@ -32,7 +36,7 @@ def reconcile(force=False):
     for sym, rec in own.items():
         if sym in ex_syms: still[sym] = rec
         else:
-            rec = dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="交易所"); store.push("closed", rec); changed = True
+            rec = dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="交易所", **close_info(sym, rec)); store.push("closed", rec); changed = True
             telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 已平倉（止損/追蹤觸發）")
     if changed or len(still) != len(own): store.update(open=still)
     store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
@@ -61,7 +65,8 @@ def place(sym, eid, sig, sz, rec):
     rec["executed"] = True; rec["fill"] = fill; rec["qty"] = qty
     rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
     own = dict(store.get().get("open", {}))
-    own[sym] = dict(engine=eid, side=sig.side, time=rec["time"], entry=sig.entry, fill=fill, stop=sig.stop, qty=qty)
+    own[sym] = dict(engine=eid, side=sig.side, time=rec["time"], ts=int(time.time() * 1000) - 5000,
+                    entry=sig.entry, fill=fill, stop=sig.stop, qty=qty, risk_usdt=sz.get("risk_usdt"))
     store.update(open=own, pending={})
     store.push("trades", rec)
 
@@ -146,6 +151,22 @@ def loop():
             store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
         time.sleep(max(1, POLL_SEC - (time.time() - t0 if "t0" in dir() else 0)))
 
+def close_info(sym, rec, since_ms=None):
+    """從成交明細抓實際出場價、已實現損益、手續費。抓不到就回 {}。"""
+    try:
+        side = "SELL" if rec.get("side") == "LONG" else "BUY"
+        since = since_ms or rec.get("ts") or int((time.time() - 3 * 86400) * 1000)
+        tr = [t for t in B.user_trades(sym) if t["side"] == side and t["time"] >= since and float(t.get("realizedPnl") or 0) != 0]
+        if not tr: return {}
+        q = sum(float(t["qty"]) for t in tr)
+        px = sum(float(t["price"]) * float(t["qty"]) for t in tr) / q
+        pnl = sum(float(t["realizedPnl"]) for t in tr) - sum(float(t.get("commission") or 0) for t in tr)
+        out = dict(exit=float(f"{px:.6g}"), pnl=round(pnl, 2))
+        if rec.get("risk_usdt"): out["r"] = round(pnl / rec["risk_usdt"], 2)
+        return out
+    except Exception as e:
+        store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 抓出場價失敗 {e}"); return {}
+
 def _refresh():
     """手動動作後立刻重抓帳號持倉，畫面不用等下一輪迴圈。"""
     try: time.sleep(0.5); reconcile(force=True)
@@ -159,11 +180,17 @@ def manage(act, sym, eid="?", stop=None):
     entry = float(pos["entryPrice"])
     own = dict(store.get().get("open", {}))
     if act == "close":
-        B.market_order(sym, "SELL" if is_long else "BUY", qty, reduce_only=True)
-        rec = own.pop(sym, None) or dict(engine=eid, side="LONG" if is_long else "SHORT", entry=entry, qty=qty)
-        store.update(open=own); store.push("closed", dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="手動"))
-        _refresh(); telegram.send(f"🏁 手動平倉 {sym}")
-        return dict(ok=True, msg=f"{sym} 已平倉")
+        t0 = int(time.time() * 1000) - 5000
+        o = B.market_order(sym, "SELL" if is_long else "BUY", qty, reduce_only=True)
+        rec = own.pop(sym, None) or dict(engine=eid, side="LONG" if is_long else "SHORT", entry=entry, fill=entry, qty=qty)
+        px = float(o.get("avgPrice") or 0) or None
+        info = dict(exit=px, pnl=round((px - entry) * qty * (1 if is_long else -1), 2) if px else None)   # 先用回報價估
+        time.sleep(1); info.update({k: v for k, v in close_info(sym, rec, t0).items() if v is not None})    # 有成交明細就用實際值（含手續費）
+        store.update(open=own); store.push("closed", dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="手動", **info))
+        _refresh()
+        msg = f"{sym} 已平倉" + (f" @ {info['exit']:.6g}，損益 {info['pnl']:+.2f} U" if info.get("exit") and info.get("pnl") is not None else "")
+        telegram.send(f"🏁 手動平倉 {msg}")
+        return dict(ok=True, msg=msg)
     if act == "adopt":
         if not stop: return dict(error="請填停損價")
         stop = float(stop)
@@ -171,7 +198,8 @@ def manage(act, sym, eid="?", stop=None):
             return dict(error=f"停損價方向不對（{'多' if is_long else '空'}單進場 {entry}）")
         B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)
         own[sym] = dict(engine=eid, side="LONG" if is_long else "SHORT", time=time.strftime("%m-%d %H:%M"),
-                        entry=entry, fill=entry, stop=stop, qty=qty, adopted=True)
+                        ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty,
+                        risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True)
         store.update(open=own); _refresh()
         telegram.send(f"♻️ 手動認領 {sym} 引擎{eid}，已補掛停損 {stop}")
         return dict(ok=True, msg=f"{sym} 已認領並補掛停損 {stop}")
@@ -277,24 +305,26 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
 </div>
 </div>
 <script>
+const F=u=>fetch(u,{headers:{'X-PDH':'1'}});
 const $=id=>document.getElementById(id);
 const num=v=>typeof v==='number'?v:null;
 function T(rows,cols,cls){if(!rows||!rows.length)return '<div class=empty>（無）</div>';
  return '<div class=scroll><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
  rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v===undefined||v===null)v='';
-   let k='';if(typeof v==='number'){if(c==='r'||c[0]==='R'&&c.length<4||c==='total')k=v>0?'pos':v<0?'neg':''}
+   let k='';if(typeof v==='number'){if(c==='r'||c==='pnl'||c==='upnl'||c[0]==='R'&&c.length<4||c==='total')k=v>0?'pos':v<0?'neg':''}
    if(c==='label'||c==='reason'||c==='skipped')k+=' lbl';
    return '<td class="'+k+'" title="'+String(v).replace(/"/g,'')+'">'+v}).join('')+'</tr>').join('')+'</table></div>'}
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));
   document.querySelectorAll('.pane').forEach(p=>p.style.display=p.id===t.dataset.t?'':'none')});
 
-async function load(){let s;try{s=await (await fetch('/api/state')).json()}catch(e){$('hmeta').innerHTML='<span style=color:var(--down)>連線失敗：'+e.message+'</span>';return}
+async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){$('hmeta').innerHTML='<span style=color:var(--down)>連線失敗：'+e.message+'</span>';return}
  if(s.error){$('hmeta').innerHTML='<span style=color:var(--down)>後端錯誤：'+s.error+'</span>';return}
  const e=s.equity||{},L=s.loop;
  const lo=Object.keys(s.live_overrides||{}).length;
  $('hmeta').innerHTML=`啟動 ${s.started||'—'} · 掃描 ${s.last_scan||'—'} · 迴圈 ${L?L.took+'s / '+L.symbols+' 檔':'—'}`+
-   (lo?` · <span style=color:var(--gold)>實盤覆蓋 ${lo} 項</span>`:'');
+   (lo?` · <span style=color:var(--gold)>實盤覆蓋 ${lo} 項</span>`:'')+
+   (s.auth_on?'':' · <span style=color:var(--down)>未設定 DASH_PASSWORD：手動操作已停用</span>');
  $('hstats').innerHTML=[
    ['持倉',Object.keys(s.open||{}).length],['擁擠',s.watch.length],['觀察',s.observe.length],
    ['訊號',s.signals.length],['已下單',s.trades.length],
@@ -318,29 +348,29 @@ async function load(){let s;try{s=await (await fetch('/api/state')).json()}catch
    (cur&&!ex.some(p=>p.symbol===cur)?`<option value="${cur}">${cur}（已不在帳號）</option>`:'');
  $('mx').value=cur;
  $('t_rest').innerHTML=`
- <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','entry','fill','stop','qty','by'])}</div>
+ <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','fill','exit','pnl','r','qty','by'])}</div>
  <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
    ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','stop_error','reason'])}</div>`}
 
 
 async function bt(){const o=$('btout');o.innerHTML='跑中…';
- const r=await (await fetch('/api/backtest?s='+$('bs').value+'&d='+$('bd').value)).json();
+ const r=await (await F('/api/backtest?s='+$('bs').value+'&d='+$('bd').value)).json();
  if(r.error){o.innerHTML='錯誤: '+r.error;return}
  o.innerHTML=`<b>${r.symbol}</b> ${r.bars} 根<br>`+T(r.summary,['engine','n','win','exp','pf','best','worst'])+'<br>'+
   T(r.trades.slice().reverse(),['time','engine','side','entry','exit','r','reason','bars'])}
 async function dg(){const o=$('btout');o.innerHTML='診斷中…';
- const r=await (await fetch('/api/diag?s='+$('bs').value+'&d='+$('bd').value)).json();
+ const r=await (await F('/api/diag?s='+$('bs').value+'&d='+$('bd').value)).json();
  if(r.error){o.innerHTML='錯誤: '+r.error;return}const c=r.counts;
  o.innerHTML=`<b>${r.symbol}</b> ${c.bars} 根 · hot ${c.hot} · pivot ${c.pivot} · top ${c.top} · vol ${c.vol} · first ${c.first} · (div ${c.div}) · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>`+
   T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','pivot','top','vol','first','fire'])}
 
 let swOpen=true;function swtoggle(){swOpen=!swOpen;swload()}
-async function swclear(){if(!confirm('清除掃描結果？（K 線快取保留）'))return;await fetch('/api/sweep/clear');swload()}
+async function swclear(){if(!confirm('清除掃描結果？（K 線快取保留）'))return;await F('/api/sweep/clear');swload()}
 async function sw(){const o=pcollect();
  const lbl=$('sl').value||Object.entries(o).map(([k,v])=>k.split('.').slice(-2).join('.')+'='+v).join(' ')||'預設';
- const r=await (await fetch('/api/sweep/start?d='+$('sd').value+'&m='+$('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
+ const r=await (await F('/api/sweep/start?d='+$('sd').value+'&m='+$('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
  if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
-async function swload(){const o=$('swout');const r=await (await fetch('/api/sweep')).json();
+async function swload(){const o=$('swout');const r=await (await F('/api/sweep')).json();
  const runs=r.runs&&r.runs.length?'<h2 style=margin-top:10px>歷次比較</h2>'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G']):'';
  if(!r.status){o.innerHTML='尚未執行'+runs;return}
  let h='<b>'+r.status+'</b>'+runs;
@@ -356,7 +386,7 @@ let PS=[],PRE={},LIVE={};
 function ptoggle(){const p=$('pform');p.style.display=p.style.display=='none'?'':'none';if(!PS.length)pform()}
 function pclear(){document.querySelectorAll('.pv').forEach(i=>i.value='')}
 function pfill(form){pclear();for(const [k,v] of Object.entries(form||{})){const el=document.querySelector('.pv[data-k="'+k+'"]');if(el)el.value=v}}
-async function pmeta(q){const r=await (await fetch('/api/presets'+(q||''))).json();PRE=r.presets||{};LIVE=r.live||{};
+async function pmeta(q){const r=await (await F('/api/presets'+(q||''))).json();if(r.error){alert(r.error);throw new Error(r.error)}PRE=r.presets||{};LIVE=r.live||{};
  $('psel').innerHTML='<option value="">— 載入組合 —</option>'+Object.keys(PRE).map(n=>`<option>${n}</option>`).join('');
  const n=Object.keys(LIVE).length;
  $('plivebox').innerHTML=n?`實盤目前覆蓋 <b>${n}</b> 項：`+Object.entries(LIVE).map(([k,v])=>k.split('.').slice(-1)+'='+v).join('、'):'實盤目前使用程式預設值';}
@@ -368,7 +398,7 @@ async function plive(){const f=pcollect();if(!Object.keys(f).length){alert('表�
  if(!confirm('把這 '+Object.keys(f).length+' 項套用到實盤？立即生效，重佈後仍有效。'))return;
  await pmeta('?act=live&form='+encodeURIComponent(JSON.stringify(f)));alert('已套用到實盤');load()}
 async function plivereset(){if(!confirm('實盤參數回到程式預設？'))return;await pmeta('?act=live&form=%7B%7D');alert('已回預設');load()}
-async function pform(){if(!PS.length)PS=await (await fetch('/api/params')).json();
+async function pform(){if(!PS.length)PS=await (await F('/api/params')).json();
  await pmeta();
  let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+=(h?'</div>':'')+'<div class=pgrp><h3>'+g+'</h3>'}
   h+=`<div class=p><label>${s.label} <span class=meta>(${s.default}${s.unit?' '+s.unit:''})</span></label>
@@ -377,14 +407,41 @@ async function pform(){if(!PS.length)PS=await (await fetch('/api/params')).json(
 function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
 async function mpos(act){const o=$('mout');const sym=$('mx').value;if(!sym){o.innerHTML='請先選幣';return}
  if(!confirm((act=='close'?'平倉 ':'認領 ')+sym+'？'))return;o.innerHTML='處理中…';
- const r=await (await fetch('/api/pos?act='+act+'&s='+encodeURIComponent(sym)+'&e='+encodeURIComponent($('me').value||'?')+'&stop='+encodeURIComponent($('ms').value||''))).json();
+ const r=await (await F('/api/pos?act='+act+'&s='+encodeURIComponent(sym)+'&e='+encodeURIComponent($('me').value||'?')+'&stop='+encodeURIComponent($('ms').value||''))).json();
  o.innerHTML=r.error?'<span style=color:var(--down)>'+r.error+'</span>':r.msg;if(!r.error){$('ms').value='';$('mx').value=''}load()}
-async function sigclear(){if(!confirm('清除訊號紀錄？（已下單紀錄保留）'))return;await fetch('/api/signals/clear');load()}
+async function sigclear(){if(!confirm('清除「訊號」和「已平倉」紀錄？（已下單紀錄保留）'))return;await F('/api/signals/clear');load()}
 load();swload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>"""
+
+WRITE = ("/api/pos", "/api/signals/clear", "/api/sweep/start", "/api/sweep/clear")
+_fail = dict(n=0, t=0)
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def _authed(self):
+        if not PASSWORD: return True
+        h = self.headers.get("Authorization", "")
+        try: pw = base64.b64decode(h[6:]).decode().split(":", 1)[1] if h.startswith("Basic ") else ""
+        except Exception: pw = ""
+        return hmac.compare_digest(pw.encode(), PASSWORD.encode())
+    def _is_write(self):
+        p = self.path
+        return p.startswith(WRITE) or (p.startswith("/api/presets") and "act=" in p)
+    def _deny(self, code, msg, basic=False):
+        self.send_response(code)
+        if basic: self.send_header("WWW-Authenticate", 'Basic realm="pump-dump-hunter", charset="UTF-8"')
+        self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers()
+        self.wfile.write(json.dumps(dict(error=msg), ensure_ascii=False).encode())
     def do_GET(self):
+        if self.path != "/health" and not self._authed():
+            if time.time() - _fail["t"] > 600: _fail.update(n=0)
+            _fail["n"] += 1; _fail["t"] = time.time()
+            time.sleep(min(10, _fail["n"]))                       # 猜密碼越猜越慢
+            return self._deny(401, "需要密碼", basic=True)
+        if self._is_write():
+            if not PASSWORD: return self._deny(200, "尚未設定 DASH_PASSWORD，手動操作已停用")
+            if self.headers.get("X-PDH") != "1": return self._deny(403, "拒絕：非本頁發出的操作")   # 擋外站連結/圖片觸發
+        return self._do_get()
+    def _do_get(self):
         try: body, ct = self._route()
         except Exception as e:
             traceback.print_exc()
@@ -393,7 +450,7 @@ class H(BaseHTTPRequestHandler):
     def _route(self):
         if self.path == "/api/state":
             s = store.get()
-            s["live_overrides"] = presets.live()
+            s["live_overrides"] = presets.live(); s["auth_on"] = bool(PASSWORD)
             try: s["live_preset"] = presets.all().get("live_name") or ("自訂" if presets.all().get("live") else None)
             except Exception: pass
             try: eq, bal = risk.equity_now(); s["equity"] = dict(tier=eq, balance=bal, error=risk._bal.get("error"), **C.SIZING)
@@ -405,7 +462,7 @@ class H(BaseHTTPRequestHandler):
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/signals/clear"):
-            store.update(signals=[]); body, ct = b'{"ok":true}', "application/json; charset=utf-8"
+            store.update(signals=[], closed=[]); body, ct = b'{"ok":true}', "application/json; charset=utf-8"
         elif self.path.startswith("/api/presets"):
             import urllib.parse
             q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
@@ -463,4 +520,4 @@ if __name__ == "__main__":
     except Exception as e: print("preset boot:", e)
     threading.Thread(target=loop, daemon=True).start()
     port = int(os.environ.get("PORT", "8080")); print("listening", port)
-    HTTPServer(("0.0.0.0", port), H).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
