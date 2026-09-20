@@ -99,7 +99,7 @@ input,button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
 <div id=btout class=meta>（結果會留在這裡，不受自動刷新影響）</div>
 <h2>歷史事件掃描（全市場，3 天漲一倍後跌四成，最多 90 天；每個事件回測高點前 10 天～後 5 天，獨立程序執行）</h2>
 <div><input id=sd type=number value=30 style="width:50px"> 天
-<select id=sm style="background:#222;color:#ddd;border:1px solid #444;border-radius:6px;padding:6px"><option value=pump>拉高崩盤事件（3天漲一倍後跌四成，高點前10天～後5天）</option><option value=crash>崩盤日（單日跌30%，不管有沒有拉升，前後2天；去偏差）</option></select>
+<select id=sm style="background:#222;color:#ddd;border:1px solid #444;border-radius:6px;padding:6px"><option value=pump>拉高崩盤事件（3天漲一倍後跌四成，高點前10天～後5天）</option><option value=crash>崩盤日（單日跌30%，不管有沒有拉升，前後2天；去偏差，測 B/C/F）</option><option value=pumpday>暴漲日（單日漲30%，不管後來崩不崩，前後2天；去偏差，測 E/G）</option></select>
 <input id=sl placeholder="這次的標籤（可空）" style="width:140px">
 <button onclick="sw()">開始掃描</button> <button onclick="swload()">重新整理</button> <button onclick="swtoggle()">收合/展開</button> <button onclick="swclear()">清除</button></div>
 <div class=meta style="margin-top:6px">調參：改哪個就填哪個，沒動的用預設（括號內）。<button onclick="pform(true)">全部還原</button> <button onclick="ptoggle()">顯示/隱藏參數</button></div>
