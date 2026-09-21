@@ -15,6 +15,8 @@ app/                 程式全部在這裡，Dockerfile 只 COPY app
   preflight.py       交易所相容性自檢 ← 可整支複製到另外兩個專案
   signals.py scanner.py risk.py backtest.py sweep.py params.py presets.py config.py store.py telegram.py
 tests/test_parity.py 回測 vs 實盤出場一致性測試（python -m tests.test_parity）
+tests/test_lessons.py 清單 r6→r8 差異的行為測試（python -m tests.test_lessons）
+部署前兩支測試都要過，且 python -m pyflakes app/ 沒有 undefined name
 BINANCE_LESSONS.md   三專案共用的踩坑清單
 ```
 

@@ -17,8 +17,9 @@ def _now(): return int(time.time() * 1000)
 def _log(msg): store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
 
 def nag(n):
-    """需要人處理的持續狀態，提醒節奏統一：第 1、5、30 次，之後每 120 次（清單第 8 條，r6）。"""
-    return n in (1, 5, 30) or (n > 0 and n % 120 == 0)
+    """需要人處理的持續狀態，提醒節奏三專案統一（清單第 8 條 r8）：第 1、5、30 次，之後第 30 次起每隔 120 次
+    （150、270、390…）。本專案迴圈 60 秒一輪（POLL_SEC），120 次約 2 小時。"""
+    return n in (1, 5, 30) or (n > 30 and (n - 30) % 120 == 0)
 
 def closed_bars(sym, tf, limit=150):
     """只留已收盤的 K 棒（Binance 最後一根是進行中的）。"""
@@ -53,8 +54,9 @@ def record_close(sym, pos, by, info=None):
         try: B.cancel_order(sym, oid, via)          # 已觸發／已撤（-2011）在 cancel_order 裡視為正常
         except Exception as e:
             _log(f"{sym} 平倉後撤殘留停損失敗 {e}（之後每輪重撤）")
-            lo = dict(store.get().get("leftover", {})); lo[str(oid)] = dict(symbol=sym, via=via, n=0, err=str(e)[:120])
+            lo = dict(store.get().get("leftover", {})); lo[str(oid)] = dict(symbol=sym, via=via, n=1, err=str(e)[:120])
             store.update(leftover=lo)
+            telegram.send(f"⚠️ {sym} 已平倉但停損單 {oid} 撤不掉（第 1 次，{str(e)[:120]}）— 之後每輪重撤，可能動到同幣其他倉")
     info = close_info(sym, pos) if info is None else info
     rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **info)
     store.push("closed", rec)
@@ -75,33 +77,46 @@ def close_now(sym, pos, by):
                   (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else ""))
     return rec
 
+class StopMoveFailed(Exception):
+    """移損失敗；move_stop 已計數並依節奏告警，呼叫端不要再發告警。"""
+
 def move_stop(sym, pos, new_stop, qty=None):
-    """先掛新停損、再撤舊的，中間不會有沒保護的空窗。"""
+    """先掛新停損、再撤舊的，中間不會有沒保護的空窗。
+    失敗計數、告警、恢復通知都在這裡——不管是出場判斷、重試、還是哪條路徑呼叫，
+    第一次失敗都算第 1 次，任何一次成功都會發恢復（清單第 8 條 r8）。"""
     is_long = pos["side"] == "LONG"
     qty = qty or pos["qty"]
     pos["want_stop"] = new_stop                     # 先記意圖：掛不上時下一輪 retry_stop 會重試
-    o = B.stop_order(sym, "SELL" if is_long else "BUY", qty, new_stop)
+    try: o = B.stop_order(sym, "SELL" if is_long else "BUY", qty, new_stop)
+    except Exception as e:
+        if "-2021" in str(e): raise                  # 價格已穿過 → 呼叫端直接出場，不算移損失敗
+        n = pos["want_fail"] = pos.get("want_fail", 0) + 1
+        if nag(n):
+            telegram.send(f"🚨 {sym} 引擎{pos.get('engine')} 停損應移到 {new_stop:.6g} 未成功（第 {n} 次，{e}）"
+                          f"— 目前停損還在 {pos.get('stop'):.6g}")
+        raise StopMoveFailed(str(e)) from None
     old, old_via = pos.get("stop_id"), pos.get("stop_via")
     if old:
         try: B.cancel_order(sym, old, old_via)
         except Exception as e:
             pos.setdefault("stale_ids", []).append([old, old_via])   # 記下來，平倉時一起撤
             _log(f"{sym} 撤舊停損失敗 {e}（已記錄，下一輪或平倉時再撤）")
+    was = pos.get("want_fail", 0)
     pos.update(stop=new_stop, stop_id=o.get("orderId"), stop_via=o.get("via"), want_stop=None, want_fail=0)
+    if was >= 1:
+        telegram.send(f"✅ {sym} 停損已移到 {new_stop:.6g}（先前失敗 {was} 次，已恢復）")
 
 def retry_stop(sym, pos):
-    """上次移損沒成功（例如新單被拒）→ 每輪重試。crypto-screener 曾因此『移損到成本』安靜失效好幾天。"""
+    """上次移損沒成功 → 每輪重試。計數、告警、恢復通知都在 move_stop 裡。
+    crypto-screener 曾因移損失敗只試一次而『移損到成本』安靜失效好幾天。"""
     want = pos.get("want_stop")
     if want is None or want == pos.get("stop"): pos["want_stop"] = None; return
-    try:
-        move_stop(sym, pos, want)
-        telegram.send(f"✅ {sym} 移動停損補上了：{want:.6g}")
+    try: move_stop(sym, pos, want)
+    except StopMoveFailed: pass
     except Exception as e:
         if "-2021" in str(e):                       # 價格已穿過想要的停損 = 本來就該出場
             close_now(sym, pos, "停損"); return "closed"
-        n = pos["want_fail"] = pos.get("want_fail", 0) + 1
-        if nag(n):                                  # 別每分鐘洗版，但要一直提醒直到恢復
-            telegram.send(f"🚨 {sym} 停損應移到 {want:.6g} 仍未成功（第 {n} 次，{e}）— 目前停損還在 {pos.get('stop'):.6g}")
+        _log(f"{sym} 重試移損 {e}")
 
 _missing = {}          # symbol → 連續幾輪確認停損不在
 
@@ -124,6 +139,9 @@ def ensure_stop(sym, pos):
            ([o for o in stops if o.get("side") == close_side][:1] if not pos.get("stop_id") else [])
     if mine:
         _missing[sym] = 0
+        was = pos.pop("guard_fail", 0)
+        if was >= 1:                                      # 補掛失敗過，現在停損在了（例如上次逾時但交易所端其實成功）
+            telegram.send(f"🔧 {sym} 引擎{pos.get('engine')} 停損單已確認存在（先前補掛失敗 {was} 次，已恢復）")
         cur = next((o for o in mine if oid(o) == pos.get("stop_id")), mine[0])
         pos["stop_id"] = oid(cur)
         for extra in mine:                                # 只撤自己記錄在案的殘留
@@ -144,7 +162,10 @@ def ensure_stop(sym, pos):
     except Exception as e:
         msg = str(e).lower()
         if "existing" in msg or "already" in msg:         # 原則 3
-            _missing[sym] = 0; _log(f"{sym} 停損其實在（補掛回報已存在），誤判"); return
+            _missing[sym] = 0; _log(f"{sym} 停損其實在（補掛回報已存在），誤判")
+            was = pos.pop("guard_fail", 0)
+            if was >= 1: telegram.send(f"🔧 {sym} 停損單已確認存在（先前補掛失敗 {was} 次，已恢復）")
+            return
         k = pos["guard_fail"] = pos.get("guard_fail", 0) + 1
         if nag(k):                                                          # 原則 4：只告警、不平倉
             telegram.send(f"🚨 {sym} 引擎{pos.get('engine')} 沒有停損單、補掛失敗（第 {k} 次）"
@@ -169,8 +190,8 @@ def step(sym, pos):
                 half = float(B.round_qty(sym, pos["qty"] / 2))
                 B.market_order(sym, "SELL" if d > 0 else "BUY", half, reduce_only=True)
                 pos["qty"] = round(pos["qty"] - half, 8); pos["tp1"] = True; pos["state"] = "已減碼"
+                telegram.send(f"✂️ {sym} 引擎{eid} 到 {R['tp1_r']}R 減碼一半，停損移到成本 {pos['entry']:.6g}")   # 減碼已成交，先通知
                 move_stop(sym, pos, pos["entry"])
-                telegram.send(f"✂️ {sym} 引擎{eid} 到 {R['tp1_r']}R 減碼一半，停損移到成本 {pos['entry']:.6g}")
             elif R["tp1_r"] is None and not pos.get("be") and R.get("be_r") and r_now >= R["be_r"]:
                 pos["be"] = True; pos["state"] = "保本"
                 move_stop(sym, pos, pos["entry"])
@@ -182,6 +203,8 @@ def step(sym, pos):
                 ns = max(pos["stop"], min(x["l"] for x in seg)) if d > 0 else min(pos["stop"], max(x["h"] for x in seg))
                 if ns != pos["stop"]:
                     move_stop(sym, pos, ns); pos["state"] = "追蹤"
+        except StopMoveFailed:
+            return None                              # 已記下想要的停損並告警，下一輪 retry_stop 重試
         except Exception as e:
             msg = str(e)
             if "-2021" in msg:                       # 新停損價已經被穿過 = 本來就該停損了
@@ -198,7 +221,7 @@ def sweep_leftovers():
     for oid, x in list(lo.items()):
         try:
             B.cancel_order(x["symbol"], int(oid) if str(oid).isdigit() else oid, x.get("via"))
-            if x["n"]: telegram.send(f"✅ {x['symbol']} 殘留停損單 {oid} 已撤掉（先前失敗 {x['n']} 次）")
+            if x["n"] >= 1: telegram.send(f"✅ {x['symbol']} 殘留停損單 {oid} 已撤掉（先前失敗 {x['n']} 次，已恢復）")
             lo.pop(oid)
         except Exception as e:
             x["n"] += 1; x["err"] = str(e)[:120]

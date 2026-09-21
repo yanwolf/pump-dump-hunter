@@ -120,11 +120,20 @@ def user_trades(symbol, limit=50):
 # ---- 下單（testnet / live 由 USE_TESTNET 決定）----
 _mode = dict(hedge=None, t=0)
 
-def position_mode_hedge():
-    """單向／雙向持倉。快取 5 分鐘：原本每張單都打一次，白白多一次 API 又多一個失敗點。"""
-    if _mode["hedge"] is not None and time.time() - _mode["t"] < 300: return _mode["hedge"]
+def _detect_mode():
+    """向交易所查持倉模式（不看快取），成功就寫進快取。"""
     h = bool(_get("/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"])
     _mode.update(hedge=h, t=time.time()); return h
+
+def position_mode_hedge(strict=True):
+    """單向／雙向持倉。快取 5 分鐘：原本每張單都打一次，白白多一次 API 又多一個失敗點。
+    strict=False 給送單用：偵測失敗不能讓單送不出去（清單第 7 條 r8「偵測失敗就放棄」）——
+    有舊值就用舊值，從沒偵測成功過就先假設單向；假設錯了會被 -4061/-1106 拒絕，再依被拒單反轉。"""
+    if _mode["hedge"] is not None and time.time() - _mode["t"] < 300: return _mode["hedge"]
+    try: return _detect_mode()
+    except Exception:
+        if strict: raise
+        return _mode["hedge"] if _mode["hedge"] is not None else False
 
 def max_leverage(symbol):
     """這個交易對帳戶能用的最高槓桿。新子帳戶常被限制在 5x，小幣分層本身也可能低於 10x。"""
@@ -147,26 +156,31 @@ def set_leverage(symbol, lev):
             except Exception: pass
         return None, f"設定槓桿失敗（{e}），沿用帳戶現有值"
 
-def _mode_fields(p, side, reduce_only):
-    """雙向模式要帶 positionSide 且不能帶 reduceOnly；單向相反。"""
+def _mode_fields(p, side, reduce_only, hedge=None):
+    """雙向模式要帶 positionSide 且不能帶 reduceOnly；單向相反。hedge 沒指定時用快取／偵測。"""
+    if hedge is None: hedge = position_mode_hedge(strict=False)
     p.pop("positionSide", None); p.pop("reduceOnly", None)
-    if position_mode_hedge(): p["positionSide"] = "SHORT" if (side == "SELL") != reduce_only else "LONG"
+    if hedge: p["positionSide"] = "SHORT" if (side == "SELL") != reduce_only else "LONG"
     elif reduce_only: p["reduceOnly"] = "true"
     return p
 
 def _send_mode_safe(path, p, side, reduce_only):
-    """共用帳號的持倉模式可能被別的專案切掉（快取還是舊的）→ 回 -4061/-1106 時重偵測、重送一次。"""
-    try: return _post(path, _mode_fields(dict(p), side, reduce_only))
+    """共用帳號的持倉模式可能被別的專案切掉 → 回 -4061/-1106 時重新偵測、重送一次（清單第 7 條 r8）。
+    - 偵測失敗時，反轉的是「這張被拒的單送出時的假設」，不是快取：快取可能從沒偵測成功過（空值），
+      也可能在送單後被別的執行緒改過（本服務有背景迴圈與網頁手動操作兩條執行緒）。
+    - 重送成功才用結果更新快取；重送也失敗就清掉快取，不留沒驗證過的值。"""
+    sent = _mode_fields(dict(p), side, reduce_only)
+    try: return _post(path, sent)
     except Exception as e:
         if not _mode_err(e): raise
-        was = _mode["hedge"]
-        _mode.update(hedge=None, t=0)
-        try: position_mode_hedge()                     # 重新偵測
+        sent_hedge = "positionSide" in sent                   # 被拒那張單的假設
+        try: actual = _detect_mode()
+        except Exception: actual = not sent_hedge
+        try: o = _post(path, _mode_fields(dict(p), side, reduce_only, hedge=actual))
         except Exception:
-            # 偵測本身也可能失敗（逾時、限流）。被 -4061/-1106 拒絕已證明快取是錯的，
-            # 留著舊值等於下一張單再錯一次 → 直接反轉（清單第 7 條，r5）
-            _mode.update(hedge=(not was) if was is not None else None, t=time.time())
-        return _post(path, _mode_fields(dict(p), side, reduce_only))
+            _mode.update(hedge=None, t=0); raise
+        _mode.update(hedge=actual, t=time.time())
+        return o
 
 def market_order(symbol, side, qty, reduce_only=False):
     p = dict(symbol=symbol, side=side, type="MARKET", quantity=round_qty(symbol, qty), newOrderRespType="RESULT")   # RESULT 才有 avgPrice
