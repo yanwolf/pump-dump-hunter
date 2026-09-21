@@ -13,6 +13,8 @@ telegram.send = lambda m: TG.append(m)
 time.sleep = lambda s: None
 from app import manager, main
 manager.telegram.send = telegram.send; main.telegram.send = telegram.send
+ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.retry_stop, record_close=manager.record_close,
+            scan=main.scanner.scan, reconcile=main.reconcile, push=store.push)
 
 fails = []
 def check(tag, name, cond, detail=""):
@@ -26,6 +28,11 @@ def fresh(hedge=False, algo="ok"):
     B._mode.update(hedge=None, t=0); B._F.clear(); B._algo.update(legacy_until=0.0)
     main._rc["t"] = 0; manager._missing.clear()
     store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[])
+    # 第 14 種：情境可能換掉模組層級的函式、留下計數器；中途出錯時還原那行不一定走得到，一律在這裡重設
+    B.klines = ORIG["klines"]; B._get = ORIG["_get"]; manager._now = ORIG["now"]; manager.retry_stop = ORIG["retry_stop"]
+    manager.record_close = ORIG["record_close"]; main.scanner.scan = ORIG["scan"]; main.reconcile = ORIG["reconcile"]
+    store.push = ORIG["push"]
+    manager._errs.clear(); main._loop_errs.clear(); manager._missing.clear()
     TG.clear()
     return fx
 
@@ -96,6 +103,12 @@ check("K2", "（前提）對帳跑完，而且全量表找不到時真的逐幣�
 check("K2", "對帳：全量表與逐幣都回空 → 部位不能被判平倉、停損不能被撤",
       "XUSDT" in store.get().get("open", {}) and so["stop_id"] in fx.algo_orders, f"err={e}")
 
+fx = fresh(); fx.open("XUSDT", "LONG", 100)                      # 對照組：全量表回空、逐幣正常 → 靠逐幣查詢認領
+store.update(pending={"XUSDT": dict(engine="C", side="LONG", time="t", entry=1.0, stop=0.9, ts=1, base_qty=0)})
+fx.inject.append(EMPTY_ALL())
+main._rc["t"] = 0; run(lambda: main.reconcile(force=True))
+check("K2", "（對照組）全量表回空、逐幣查詢正常 → pending 靠逐幣查詢認領回來", "XUSDT" in store.get().get("open", {}))
+
 fx = fresh(); fx.open("XUSDT", "LONG", 100)
 store.update(pending={"XUSDT": dict(engine="C", side="LONG", time="t", entry=1.0, stop=0.9, ts=1, base_qty=0)})   # 早已過期
 fx.inject.append(EMPTY_ALL()); fx.inject.append(EMPTY_ONE())
@@ -114,6 +127,7 @@ fx = fresh()                                                       # 突變豁�
 fx.inject.append(EMPTY_ONE())
 mark = len(fx.calls)
 rec = main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=300_000))
+check("K2", "（前提）place 真的去逐幣查了基準", any(c[1] == "/fapi/v2/positionRisk" and "symbol" in c[2] for c in since(fx, mark)))
 check("K2", "送單前基準查詢回空清單 → 不送單", not sent_market(since(fx, mark), reduce=False), f"skipped={rec.get('skipped')}")
 check("K2", "不送單的原因是基準查不到（不是別的原因）", "基準" in (rec.get("skipped") or ""), f"skipped={rec.get('skipped')}")
 

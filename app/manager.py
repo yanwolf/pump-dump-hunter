@@ -134,6 +134,20 @@ def retry_close(sym, pos):
     try: close_now(sym, pos, pos["want_close"]); return "closed"
     except CloseFailed: return "pending"
 
+def place_stop(sym, pos, price, qty=None, known_left=None):
+    """所有「掛一張新停損」都走這裡：第一次掛、認領、手動認領、移損掛新、守衛補掛（清單第 2 條 r20、r21）。
+    - 先確認自己的部位還在（扣基準）。呼叫端手上有正向證據（剛成交的回應、交易所那一列）時傳 known_left，免得再查一次。
+      危險的是「空清單被當成沒有」，不是反過來——正向證據可以直接用。
+    - 查不到 → ("unknown", None)：這輪不掛、不算失敗（第 2 條 r17）
+    - 自己的部位已經沒了 → ("gone", None)：不掛，交給對帳結帳（否則就是孤兒單，第 7、13 條）
+    - 還在 → 數量取「交易所−基準」與帳上／指定數量的小者，reduce-only 帶數量（不用 closePosition，有基準時不會平到別人的，r21）
+    交易所拒絕照樣往上拋，讓呼叫端照自己的規則計數、重試。"""
+    left = known_left if known_left is not None else remaining(sym, pos["side"], pos.get("base_qty") or 0.0)
+    if left is None: return "unknown", None
+    if left <= 0: return "gone", None
+    q = min(qty or pos["qty"], left)
+    return "ok", B.stop_order(sym, "SELL" if pos["side"] == "LONG" else "BUY", q, price)
+
 class StopMoveFailed(Exception):
     """移損失敗；move_stop 已計數並依節奏告警，呼叫端不要再發告警。"""
 
@@ -141,10 +155,10 @@ def move_stop(sym, pos, new_stop, qty=None):
     """先掛新停損、再撤舊的，中間不會有沒保護的空窗。
     失敗計數、告警、恢復通知都在這裡——不管是出場判斷、重試、還是哪條路徑呼叫，
     第一次失敗都算第 1 次，任何一次成功都會發恢復（清單第 8 條 r8）。"""
-    is_long = pos["side"] == "LONG"
-    qty = qty or pos["qty"]
-    pos["want_stop"] = new_stop                     # 先記意圖：掛不上時下一輪 retry_stop 會重試
-    try: o = B.stop_order(sym, "SELL" if is_long else "BUY", qty, new_stop)
+    pos["want_stop"] = new_stop                     # 先記意圖：掛不上或這輪查不到部位時，下一輪 retry_stop 會重試
+    try:
+        st, o = place_stop(sym, pos, new_stop, qty)
+        if st != "ok": return st                     # unknown：這輪不動、不算失敗；gone：交給對帳（清單第 2 條 r20）
     except Exception as e:
         if "-2021" in str(e): raise                  # 價格已穿過 → 呼叫端直接出場，不算移損失敗
         n = pos["want_fail"] = pos.get("want_fail", 0) + 1
@@ -212,11 +226,9 @@ def ensure_stop(sym, pos):
     if n < 3: return                                      # 原則 2
     # 補掛前逐幣確認自己的部位還在（扣基準）。部位其實已經沒了（對帳這輪出錯沒偵測到）時補掛，
     # 就是一張孤兒 reduce-only 單，單向共用帳號裡還可能平到別人同側的倉（清單第 7、13 條）。
-    left = remaining(sym, pos["side"], pos.get("base_qty") or 0.0)
-    if left is None: return                               # 查不到（含逐幣回空清單，第 2 條 r17）→ 這輪不動
-    if left == 0: return                                  # 自己的部位已經沒了 → 交給對帳結帳，不補
     try:
-        o = B.stop_order(sym, "SELL" if pos["side"] == "LONG" else "BUY", min(pos["qty"], left), pos["stop"])
+        st, o = place_stop(sym, pos, pos["stop"])        # 確認部位、扣基準都在共用處（清單第 2 條 r19、r20）
+        if st != "ok": return                             # 查不到這輪不動；已沒了交給對帳
         pos["stop_id"] = o.get("orderId"); pos["stop_via"] = o.get("via"); _missing[sym] = 0
         was = pos.pop("guard_fail", 0)
         _log(f"{sym} 停損單不見了，已補掛 {pos['stop']}")
@@ -297,14 +309,19 @@ def sweep_leftovers():
     lo = dict(store.get().get("leftover", {}))
     if not lo: return
     for oid, x in list(lo.items()):
+        # 每一筆各自 try：某一筆資料壞掉，其他筆照樣重撤；壞掉的那筆留在清單、照節奏推播，不能被靜靜丟掉（清單第 8 條 r21）。
+        # 告警訊息只用 .get() 組，except 裡不能再拋。
+        x = x if isinstance(x, dict) else {}
+        sym = x.get("symbol", "?")
         try:
             B.cancel_order(x["symbol"], int(oid) if str(oid).isdigit() else oid, x.get("via"))
-            if x["n"] >= 1: telegram.send(f"✅ {x['symbol']} 殘留停損單 {oid} 已撤掉（先前失敗 {x['n']} 次，已恢復）")
+            n = x.get("n", 0)
             lo.pop(oid)
+            if n >= 1: telegram.send(f"✅ {sym} 殘留停損單 {oid} 已撤掉（先前失敗 {n} 次，已恢復）")
         except Exception as e:
-            x["n"] += 1; x["err"] = str(e)[:120]
+            x["n"] = x.get("n", 0) + 1; x["err"] = f"{type(e).__name__}: {e}"[:120]; lo[oid] = x
             if nag(x["n"]):
-                telegram.send(f"⚠️ {x['symbol']} 已平倉但停損單 {oid} 撤不掉（第 {x['n']} 次，{x['err']}）"
+                telegram.send(f"⚠️ {sym} 殘留停損單 {oid} 撤不掉／處理出錯（第 {x['n']} 次，{x['err']}）"
                               f"— 可能動到同幣其他倉，請到交易所手動撤")
     store.update(leftover=lo)
 
@@ -324,8 +341,8 @@ def _step_ok(sym, stage):
 
 def run():
     """每輪迴圈呼叫一次（在 reconcile 之後，已被交易所停損掉的倉不會進來）。"""
-    try: sweep_leftovers()
-    except Exception as e: _log(f"重撤殘留單 {e}")
+    try: sweep_leftovers(); _step_ok("*", "重撤殘留單")
+    except Exception as e: _step_err("*", "重撤殘留單", e)
     for sym in list(store.get().get("open", {})):
         pos = dict(store.get().get("open", {}).get(sym) or {})
         if not pos: continue

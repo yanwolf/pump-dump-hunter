@@ -13,6 +13,8 @@ telegram.send = lambda m: TG.append(m)
 time.sleep = lambda s: None
 from app import manager, main
 manager.telegram.send = telegram.send; main.telegram.send = telegram.send
+ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.retry_stop, record_close=manager.record_close,
+            scan=main.scanner.scan, reconcile=main.reconcile, push=store.push)
 
 fails = []
 def check(tag, name, cond, detail=""):
@@ -28,6 +30,11 @@ def fresh(hedge=False, algo="ok"):
     main._rc["t"] = 0
     manager._missing.clear()
     store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[])
+    # 第 14 種：情境可能換掉模組層級的函式、留下計數器；中途出錯時還原那行不一定走得到，一律在這裡重設
+    B.klines = ORIG["klines"]; B._get = ORIG["_get"]; manager._now = ORIG["now"]; manager.retry_stop = ORIG["retry_stop"]
+    manager.record_close = ORIG["record_close"]; main.scanner.scan = ORIG["scan"]; main.reconcile = ORIG["reconcile"]
+    store.push = ORIG["push"]
+    manager._errs.clear(); main._loop_errs.clear(); manager._missing.clear()
     TG.clear()
     return fx
 
@@ -116,6 +123,7 @@ check("C2", "單向空單（負數）認領 → 數量取絕對值 250", own.get
 check("C2", "認領 → 成交均價用交易所的 1.2（不是訊號價 1.25）", own.get("fill") == 1.2, f"own={own}")
 check("C2", "認領 → 立刻補掛停損（不等守衛 3 輪）", any(o["symbol"] == "XUSDT" for o in fx.algo_orders.values()),
       f"掛單={list(fx.algo_orders.values())}")
+check("C2", "（前提）認領已完成、帳上有這個部位", "XUSDT" in store.get().get("open", {}))
 for _ in range(3): manager.run()                              # 守衛要連 3 輪才補掛，跑滿 3 輪才會碰到 qty
 errs = [x for x in store.get().get("errors", []) + TG if "'qty'" in x or "KeyError" in x or "程式錯誤" in x]
 check("C2", "認領後跑滿 3 輪出場管理與守衛，不因缺欄位出錯（錯誤區與推播都要看）", not errs, f"{errs[-2:]}")
@@ -127,6 +135,9 @@ store.update(pending={"XUSDT": dict(engine="C", side="LONG", time="t", entry=1.0
 main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
 check("C2", "（前提）對帳真的跑完，交易所那列 SHORT 有被讀到（第 8 種）",
       e is None and any(x["symbol"] == "XUSDT" and x["amt"] < 0 for x in store.get().get("exchange", [])), f"err={e}")
+rows, e2 = run(lambda: B.position_rows("XUSDT"))
+check("C2", "（前提）逐幣查詢有回來，而且交易所上這個幣只有 SHORT（不是「查不到」才沒認領）",
+      e2 is None and rows and all(B.side_of(p) == "SHORT" for p in rows), f"err={e2}")
 check("C2", "雙向：只有別人的 SHORT → 不能認領成自己的 LONG", "XUSDT" not in store.get().get("open", {}))
 
 fx = fresh(hedge=True)
@@ -195,8 +206,13 @@ check("F1", "平倉逾時但其實成交 → 查部位確認沒了才記帳，�
 fx = fresh(hedge=True); so = setup_open(fx, qty=100)
 fx.pos[("XUSDT", "LONG")][0] = 60                            # 帳上 100，交易所實際 60（例如在 App 手動減過）
 pos = dict(store.get()["open"]["XUSDT"])
+mark = len(fx.calls)
 r, e = run(lambda: manager.close_now("XUSDT", pos, "時間"))
-check("F2", "雙向超量被拒 → 用交易所實際數量 60 重送、平掉", fx.qty("XUSDT", "LONG") == 0 and e is None, f"err={e}")
+mk = [c for c in since(fx, mark) if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
+# r16 起平倉前先確認自己剩多少：帳上 100、交易所 60 → 一開始就送 60，不會再「超量被拒 → 重送」
+check("F2", "（前提）平倉單真的送出，而且第一張就是交易所實際的 60（平倉前先確認，r16）",
+      len(mk) >= 1 and float(mk[0][2].get("quantity", 0)) == 60, f"{[c[2].get('quantity') for c in mk]}")
+check("F2", "雙向帳實不符 → 用交易所實際數量 60 平掉", fx.qty("XUSDT", "LONG") == 0 and e is None, f"err={e}")
 
 fx = fresh(); setup_open(fx)
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("reduceOnly") == "true",
@@ -224,6 +240,7 @@ fx = fresh(); setup_open(fx)
 pos = dict(store.get()["open"]["XUSDT"]); pos.update(want_stop=1.0, want_fail=3, guard_fail=2)
 manager._missing["XUSDT"] = 2
 manager.record_close("XUSDT", pos, "停損單", info={})
+check("E3", "（前提）平倉紀錄真的寫進去了", bool(store.get().get("closed")))
 check("E3", "失敗中部位被平掉 → 發收尾通知（移損／補掛失敗狀態隨平倉結束）",
       any("隨平倉結束" in m or "收尾" in m for m in TG), f"{TG}")
 check("E4", "平倉後補掛連續次數歸零，同幣下次進場不會接著數", not manager._missing.get("XUSDT"))
@@ -232,6 +249,7 @@ p = dict(store.get()["open"]["XUSDT"]); p.update(want_stop=1.0, want_fail=3, gua
 manager._missing["XUSDT"] = 2
 fx.pos.clear()                                                 # 交易所上部位沒了（停損觸發）
 main._rc["t"] = 0; main.reconcile(force=True)                  # 第 9 種：走完整對帳，不單獨呼叫 record_close
+check("E3", "（前提）完整對帳真的把這筆記成平倉", bool(store.get().get("closed")))
 check("E3", "完整對帳發現平倉 → 收尾通知", any("隨平倉結束" in m for m in TG), f"{TG}")
 check("E4", "完整對帳發現平倉 → 補掛次數歸零", not manager._missing.get("XUSDT"))
 

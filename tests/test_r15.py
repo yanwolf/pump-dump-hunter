@@ -13,6 +13,8 @@ telegram.send = lambda m: TG.append(m)
 time.sleep = lambda s: None
 from app import manager, main
 manager.telegram.send = telegram.send; main.telegram.send = telegram.send
+ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.retry_stop, record_close=manager.record_close,
+            scan=main.scanner.scan, reconcile=main.reconcile, push=store.push)
 
 fails = []
 def check(tag, name, cond, detail=""):
@@ -26,6 +28,11 @@ def fresh(hedge=False, algo="ok"):
     B._mode.update(hedge=None, t=0); B._F.clear(); B._algo.update(legacy_until=0.0)
     main._rc["t"] = 0; manager._missing.clear()
     store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[])
+    # 第 14 種：情境可能換掉模組層級的函式、留下計數器；中途出錯時還原那行不一定走得到，一律在這裡重設
+    B.klines = ORIG["klines"]; B._get = ORIG["_get"]; manager._now = ORIG["now"]; manager.retry_stop = ORIG["retry_stop"]
+    manager.record_close = ORIG["record_close"]; main.scanner.scan = ORIG["scan"]; main.reconcile = ORIG["reconcile"]
+    store.push = ORIG["push"]
+    manager._errs.clear(); main._loop_errs.clear(); manager._missing.clear()
     TG.clear()
     return fx
 
@@ -78,6 +85,8 @@ check("H2", "全量表空清單 → 部位不能被判平倉", "XUSDT" in store.
 check("H2", "全量表空清單 → 停損不能被撤", so["stop_id"] in fx.algo_orders)
 check("H2", "全量表空清單 → 有逐幣再查一次（第 8 種：確認真的做了檢查）",
       any(c[1] == "/fapi/v2/positionRisk" and c[2].get("symbol") == "XUSDT" for c in fx.calls))
+check("H2", "（前提）逐幣再查成功、看到部位還在（不是「兩邊都查不到」才沒判平倉）",
+      not any("逐幣查詢也失敗" in x for x in store.get().get("errors", [])), f"{store.get().get('errors', [])[-1:]}")
 
 fx = fresh(); fx.open("XUSDT", "LONG", 100); so = own_pos(fx)
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("type") == "MARKET",
@@ -110,7 +119,7 @@ fx = fresh(); fx.open("XUSDT", "SHORT", 250, entry=1.2)
 store.update(pending={"XUSDT": dict(engine="C", side="SHORT", time="t", entry=1.25, stop=1.35, ts=int(time.time()*1000), base_qty=0)})
 main._rc["t"] = 0; main.reconcile(force=True)
 stops = [o for o in fx.algo_orders.values() if o["symbol"] == "XUSDT"]
-check("H4", "完整對帳：認領後同一輪部位仍在帳上", "XUSDT" in store.get().get("open", {}))
+check("H4", "（前提）完整對帳：認領後同一輪部位仍在帳上", "XUSDT" in store.get().get("open", {}))
 check("H4", "完整對帳：同一輪沒有被記成平倉", not store.get().get("closed"))
 check("H4", "完整對帳：剛掛的停損沒有被撤", len(stops) == 1, f"{stops}")
 
@@ -131,6 +140,7 @@ check("H5", "單向：沒送單 → 回錯誤（不是已平倉）", isinstance(
 
 fx = fresh(); fx.open("XUSDT", "LONG", 40); own_pos(fx, qty=100, base=40)
 main._rc["t"] = 0; main.reconcile(force=True)
+check("H5", "（前提）對帳真的把這筆記成平倉（寫了平倉紀錄）", bool(store.get().get("closed")))
 check("H5", "對帳：扣掉基準後自己的 0 → 判成已平倉（不是「數量減少 100→40」）",
       "XUSDT" not in store.get().get("open", {}) and not any("減少" in m for m in TG), f"{TG}")
 
@@ -169,7 +179,9 @@ check("H8", "移損遇 -2021 → 送平倉單那一刻，交易所上仍有停�
 fx = fresh(); fx.open("XUSDT", "LONG", 100); own_pos(fx, stop_on_exchange=False); spy(fx); seen.clear()
 fx.inject.append(dict(path="/fapi/v1/algoOrder", method="POST", times=5, kind="http", code=400,
                       body='{"code":-2021,"msg":"Order would immediately trigger."}'))
+mark = len(fx.calls)
 for _ in range(3): manager.run()
+check("H8", "（前提）守衛真的送出平倉單", len(market_closes(since(fx, mark))) >= 1)
 check("H8", "守衛補掛遇 -2021（價格已穿過停損）→ 直接平倉，不是只告警", fx.qty("XUSDT", "LONG") == 0,
       f"剩 {fx.qty('XUSDT','LONG')} 推播={TG[-2:]}")
 
@@ -191,6 +203,7 @@ check("H7", "待平倉期間每輪只送一張平倉單（出場判斷不再觸�
 print("用法第 5 點 r15：通知在 try 裡的錯誤不能被吞")
 ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
 bugs = [x for x in ALL_ERR if any(k in x for k in ("NameError", "AttributeError", "TypeError", "KeyError", "is not defined"))]
+check("H10", "（前提）有收集到各情境的錯誤區與推播", len(ALL_ERR) > 0)
 check("H10", "所有情境的錯誤區與推播裡，沒有程式錯誤", not bugs, f"{bugs[:3]}")
 
 print("\n全部通過" if not fails else f"\n{len(fails)} 項失敗：{sorted(set(fails))}")

@@ -16,6 +16,12 @@ SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.ge
 
 _rc = dict(t=0, n=0, ex=[])
 
+def _say(build, who="*"):
+    """發通知是獨立的一步（清單第 8 條 r21）：組字串或送出出錯，不能中斷前面已經做完的動作（例如已經結帳、撤停損），
+    也不能被吞掉——照節奏推播一則「通知出錯」。build 是組訊息的函式，讓格式化也在 try 裡。"""
+    try: telegram.send(build())
+    except Exception as e: manager._step_err(who, "通知", e)
+
 PENDING_TTL = 180          # 送單結果不明的 pending 最多等幾秒；過了交易所還沒有這個部位才放棄
 
 def _row(ex, sym, side):
@@ -25,7 +31,9 @@ def _row(ex, sym, side):
 def _protect(sym, pos):
     """立刻掛停損（認領回來的部位用；不等守衛連 3 輪）。失敗交給守衛，照節奏告警。"""
     try:
-        so = B.stop_order(sym, "SELL" if pos["side"] == "LONG" else "BUY", pos["qty"], pos["stop"])
+        # 走共用送停損處；交易所那一列就是「部位在」的正向證據，直接傳進去（清單第 2 條 r20、r21）
+        st, so = manager.place_stop(sym, pos, pos["stop"], known_left=pos["qty"])
+        if st != "ok": return False
         pos.update(stop_id=so.get("orderId"), stop_via=so.get("via")); return True
     except Exception as e:
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 認領後掛停損失敗 {e}"); return False
@@ -44,64 +52,74 @@ def reconcile(force=False):
 
     now_ms = int(time.time() * 1000)
     for sym, rec in list(pend.items()):
-        if sym in own: pend.pop(sym); continue
-        row = _row(ex, sym, rec.get("side"))
-        if not row:
-            # 全量表找不到 → 逐幣再查（全量表可能回空清單，清單第 2 條 r15）；逐幣也查不到就這輪不動
-            try: row = _row(B.position_rows(sym), sym, rec.get("side"))
-            except Exception: continue
-        base = rec.get("base_qty") or 0.0
-        mine = abs(float(row["positionAmt"])) - base if row else 0.0
-        if row and mine > 1e-9:
-            # 認領數量 = 交易所這一側 − 送單前的基準（清單第 3 條 r14）
-            qty, avg = mine, float(row["entryPrice"])
-            merged = base > 1e-9
-            if merged and rec.get("base_px"):          # 交易所均價是合併過的，反推這張單的成交價（估計值）
-                fill = round((avg * (mine + base) - rec["base_px"] * base) / mine, 10)
-            else: fill = avg
-            stop = rec["stop"]
-            pos = dict(engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=rec.get("ts", now_ms),
-                       bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), entry=rec["entry"], fill=fill, stop=stop, qty=qty,
-                       base_qty=base, r_unit=abs(rec["entry"] - stop), risk_usdt=round(abs(rec["entry"] - stop) * qty, 4),
-                       state="初始", adopted=True)
-            ok = _protect(sym, pos)
-            own[sym] = pos; pend.pop(sym)
-            store.push("errors", f"{time.strftime('%m-%d %H:%M')} 認領 {sym}（引擎{pos['engine']}）數量 {qty:g} 均價 {fill:g}")
-            telegram.send(f"♻️ 認領 {sym} 引擎{pos['engine']}：送單結果不明或記帳中斷，交易所上確實有部位，"
-                          f"已照交易所數量 {qty:g}、均價 {fill:g} 記帳"
-                          + (f"（這一側送單前已有 {base:g}，交易所均價 {avg:g} 是合併過的，{fill:g} 是反推的估計值，"
-                             f"不是這張單的實際成交價）" if merged else "")
-                          + ("，停損已掛上" if ok else "，⚠️ 停損還沒掛上（守衛會重試）"))
-        elif now_ms - rec.get("ts", 0) > PENDING_TTL * 1000:          # 上面已經逐幣確認過沒有
-            pend.pop(sym)
-            telegram.send(f"ℹ️ {sym} 引擎{rec.get('engine')} 送單結果不明，{PENDING_TTL} 秒內交易所都沒有這個部位，判定未成交")
+        try:
+            if sym in own: pend.pop(sym); continue
+            row = _row(ex, sym, rec.get("side"))
+            if not row:
+                # 全量表找不到 → 逐幣再查（全量表可能回空清單，清單第 2 條 r15）；逐幣也查不到就這輪不動
+                try: row = _row(B.position_rows(sym), sym, rec.get("side"))
+                except Exception: continue
+            base = rec.get("base_qty") or 0.0
+            mine = abs(float(row["positionAmt"])) - base if row else 0.0
+            if row and mine > 1e-9:
+                # 認領數量 = 交易所這一側 − 送單前的基準（清單第 3 條 r14）
+                qty, avg = mine, float(row["entryPrice"])
+                merged = base > 1e-9
+                if merged and rec.get("base_px"):          # 交易所均價是合併過的，反推這張單的成交價（估計值）
+                    fill = round((avg * (mine + base) - rec["base_px"] * base) / mine, 10)
+                else: fill = avg
+                stop = rec["stop"]
+                pos = dict(engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=rec.get("ts", now_ms),
+                           bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), entry=rec["entry"], fill=fill, stop=stop, qty=qty,
+                           base_qty=base, r_unit=abs(rec["entry"] - stop), risk_usdt=round(abs(rec["entry"] - stop) * qty, 4),
+                           state="初始", adopted=True)
+                ok = _protect(sym, pos)
+                own[sym] = pos; pend.pop(sym)
+                store.push("errors", f"{time.strftime('%m-%d %H:%M')} 認領 {sym}（引擎{pos['engine']}）數量 {qty:g} 均價 {fill:g}")
+                _say(lambda: f"♻️ 認領 {sym} 引擎{pos['engine']}：送單結果不明或記帳中斷，交易所上確實有部位，"
+                              f"已照交易所數量 {qty:g}、均價 {fill:g} 記帳"
+                              + (f"（這一側送單前已有 {base:g}，交易所均價 {avg:g} 是合併過的，{fill:g} 是反推的估計值，"
+                                 f"不是這張單的實際成交價）" if merged else "")
+                              + ("，停損已掛上" if ok else "，⚠️ 停損還沒掛上（守衛會重試）"), sym)
+            elif now_ms - rec.get("ts", 0) > PENDING_TTL * 1000:          # 上面已經逐幣確認過沒有
+                pend.pop(sym)
+                telegram.send(f"ℹ️ {sym} 引擎{rec.get('engine')} 送單結果不明，{PENDING_TTL} 秒內交易所都沒有這個部位，判定未成交")
+            manager._step_ok(sym, "對帳認領")
+        except Exception as e:
+            manager._step_err(sym, "對帳認領", e)   # 一筆出錯不中斷整個對帳，照節奏推播（清單第 8 條 r21）
+            # pending 保留，下一輪再試
 
     still, changed = {}, False
     for sym, rec in own.items():
-        row = _row(ex, sym, rec.get("side"))
-        if not row:
-            # 全量表裡找不到：可能真的平了，也可能是全量表異常回空清單（清單第 2 條 r15）→ 逐幣再查一次
-            try: row = _row(B.position_rows(sym), sym, rec.get("side"))
-            except Exception as e:
-                store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 全量表找不到、逐幣查詢也失敗 {e}，這輪不動")
-                still[sym] = rec; continue
-        base = rec.get("base_qty") or 0.0
-        left = abs(float(row["positionAmt"])) - base if row else 0.0     # 自己的 = 這一側 − 基準（第 7 條 r15）
-        if left > 1e-9:
-            if rec.get("qty") and left < rec["qty"] - 1e-9:          # 數量變少：記部分出場（清單第 8 條 r12，已扣基準）
-                px = float(row.get("markPrice") or row.get("entryPrice") or 0) or None
-                cut = rec["qty"] - left
-                est = round((px - rec.get("fill", rec["entry"])) * cut * (1 if rec["side"] == "LONG" else -1), 2) if px else None
-                rec = dict(rec, qty=left, partials=rec.get("partials", []) + [dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=est or 0)])
-                changed = True
-                telegram.send(f"✂️ {sym} 引擎{rec.get('engine')} 交易所上的數量減少 {rec['qty'] + cut:g} → {left:g}"
-                              f"（不是本程式送的單，可能是在 App 手動減碼），已記一筆部分出場並更新帳上數量")
-            still[sym] = rec
-        else:
-            rec = manager.record_close(sym, rec, "停損單"); changed = True
-            telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 停損單觸發出場" +
-                          (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
-                          (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else ""))
+        try:
+            row = _row(ex, sym, rec.get("side"))
+            if not row:
+                # 全量表裡找不到：可能真的平了，也可能是全量表異常回空清單（清單第 2 條 r15）→ 逐幣再查一次
+                try: row = _row(B.position_rows(sym), sym, rec.get("side"))
+                except Exception as e:
+                    store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 全量表找不到、逐幣查詢也失敗 {e}，這輪不動")
+                    still[sym] = rec; continue
+            base = rec.get("base_qty") or 0.0
+            left = abs(float(row["positionAmt"])) - base if row else 0.0     # 自己的 = 這一側 − 基準（第 7 條 r15）
+            if left > 1e-9:
+                if rec.get("qty") and left < rec["qty"] - 1e-9:          # 數量變少：記部分出場（清單第 8 條 r12，已扣基準）
+                    px = float(row.get("markPrice") or row.get("entryPrice") or 0) or None
+                    cut = rec["qty"] - left
+                    est = round((px - rec.get("fill", rec["entry"])) * cut * (1 if rec["side"] == "LONG" else -1), 2) if px else None
+                    rec = dict(rec, qty=left, partials=rec.get("partials", []) + [dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=est or 0)])
+                    changed = True
+                    telegram.send(f"✂️ {sym} 引擎{rec.get('engine')} 交易所上的數量減少 {rec['qty'] + cut:g} → {left:g}"
+                                  f"（不是本程式送的單，可能是在 App 手動減碼），已記一筆部分出場並更新帳上數量")
+                still[sym] = rec
+            else:
+                rec = manager.record_close(sym, rec, "停損單"); changed = True
+                _say(lambda: f"🏁 {sym} 引擎{rec.get('engine')} 停損單觸發出場" +
+                              (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
+                              (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else ""), sym)
+            manager._step_ok(sym, "對帳")
+        except Exception as e:
+            manager._step_err(sym, "對帳", e)   # 一筆出錯不中斷整個對帳，照節奏推播（清單第 8 條 r21）
+            still[sym] = rec                                      # 出錯的這筆保守保留在帳上，下一輪再對
     store.update(open=still, pending=pend)
     def _mine_upnl(p):
         """本策略那一列的未實現損益：自己的數量 ×（標記價 − 自己的成交價）。交易所那一列的
@@ -186,7 +204,8 @@ def place(sym, eid, sig, sz, rec):
     err = None                                  # 停損單：失敗重試一次
     for _ in range(2):
         try:
-            so = B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop_px); err = None
+            # 剛成交的回應就是正向證據（成交數量 qty），走共用送停損處（清單第 2 條 r20）
+            st, so = manager.place_stop(sym, dict(side=sig.side, qty=qty, base_qty=base_qty), stop_px, known_left=qty); err = None
             own = dict(store.get().get("open", {}))
             if sym in own: own[sym] = dict(own[sym], stop_id=so.get("orderId"), stop_via=so.get("via")); store.update(open=own)
             break
@@ -345,7 +364,8 @@ def manage(act, sym, eid="?", stop=None):
         stop = float(stop); is_long = side == "LONG"
         if (is_long and stop >= entry) or (not is_long and stop <= entry):
             return dict(error=f"停損價方向不對（{'多' if is_long else '空'}單進場 {entry}）")
-        so = B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)   # via 一起記，撤單才知道打哪個端點
+        # 交易所那一列是正向證據；走共用送停損處（清單第 2 條 r20）。via 一起記，撤單才知道打哪個端點
+        st, so = manager.place_stop(sym, dict(side=side, qty=qty, base_qty=0), stop, known_left=qty)
         own = dict(store.get().get("open", {}))
         own[sym] = dict(engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
                         ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty, r_unit=abs(entry - stop),

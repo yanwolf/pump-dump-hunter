@@ -1,58 +1,61 @@
-"""突變檢查（清單用法第 5 點 r18）：故意弄壞新規則的前置條件，找出「空跑通過」的測試。
+"""突變檢查：逐項比對（清單用法第 5 點 r21）。在專案根目錄執行：python -m tests.mutation_check
 
-突變 no_base：模擬交易所的逐幣部位查詢一律回空清單 → 送單前基準查不到 → 進場單不送。
-在這個突變下，**要靠送出進場單才成立的測試必須明確失敗**。還通過的，要逐一判斷：
-  - 本來就跟進場無關（例如直接建好部位、測平倉或守衛）→ 正常
-  - 需要進場單卻還通過 → 空跑：補前提斷言「單真的送出去了」
-
-在專案根目錄執行：python -m tests.mutation_check
-列出每支測試在突變下「仍通過」的項目，並標出其中屬於「會送進場單」情境的。
+突變 no_base：模擬交易所的逐幣部位查詢一律回空清單（PDH_MUTATE=no_base）→ 基準查不到、平倉確認查不到、守衛確認查不到。
+規則：
+1. 突變下仍通過的**每一項**，都必須列在 tests/mutation_exempt.py 並寫理由；不在清單的 = 空跑。
+   （r18 版只要求「每個會送單的情境至少一項失敗」，抓不到單項空跑。）
+2. 理由是「前提」或「對照組」的，被引用的那一項在突變下**必須真的失敗**，否則豁免不成立。
+3. 豁免清單裡、實際上已經不存在或突變下已經會失敗的項目要刪掉（避免清單過期、蓋住將來的空跑）。
+4. 正常（沒有突變）時，所有測試必須全部通過——豁免只在突變下有意義。
 """
 import os, re, subprocess, sys
+from tests.mutation_exempt import EXEMPT
 
-TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18"]
-# 這些情境的程式路徑會呼叫 main.place（送進場單）。在突變下，情境內至少要有一項明確失敗。
-PLACE_MARKERS = ("main.place(",)
-
-def scenarios(module):
-    """把測試檔依 fresh() 切成情境，回傳 [(起始行號, 是否呼叫 place, 該情境的 check 名稱)]"""
-    src = open(module.replace(".", "/") + ".py", encoding="utf-8").read().splitlines()
-    out, cur = [], None
-    for i, line in enumerate(src, 1):
-        if "fresh(" in line and "def fresh" not in line:
-            cur = dict(line=i, place=False, checks=[], exempt="突變豁免" in line); out.append(cur)
-        if cur is None: continue
-        if any(m in line for m in PLACE_MARKERS): cur["place"] = True
-        m = re.search(r'check\("[^"]+",\s*"([^"]+)"', line)
-        if m: cur["checks"].append(m.group(1))
-    return out
+TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21"]
+LINE = re.compile(r"^  (✅|❌) \[[^\]]+\] (.+?)(?:　.*)?$", re.M)
 
 def run(module, mutate):
-    env = dict(os.environ, PDH_MUTATE=mutate)
+    env = dict(os.environ); env.pop("PDH_MUTATE", None)
+    if mutate: env["PDH_MUTATE"] = mutate
     p = subprocess.run([sys.executable, "-m", module], env=env, capture_output=True, text=True, timeout=300)
-    passed = set(re.findall(r"✅ \[[^\]]+\] (.+?)(?:　|$)", p.stdout, re.M))
-    failed = set(re.findall(r"❌ \[[^\]]+\] (.+?)(?:　|$)", p.stdout, re.M))
-    return passed, failed, p.stdout
+    items = LINE.findall(p.stdout)
+    return [n for s, n in items if s == "✅"], [n for s, n in items if s == "❌"]
+
+def match(prefix, names):
+    return [n for n in names if n.startswith(prefix)]
 
 def main():
-    bad = 0
+    problems = []
+    normal_fail = {}
+    passed, failed = {}, {}
     for mod in TESTS:
-        passed, failed, _ = run(mod, "no_base")
-        print(f"\n===== {mod}（突變 no_base：逐幣查詢回空 → 基準查不到 → 不送進場單）=====")
-        print(f"  仍通過 {len(passed)} 項、失敗 {len(failed)} 項")
-        for sc in scenarios(mod):
-            if not sc["place"]: continue
-            if sc["exempt"]:
-                print(f"  （豁免）第 {sc['line']} 行起的情境：本來就在測突變條件本身"); continue
-            names = [n for n in sc["checks"] if n]
-            still = [n for n in names if any(n.startswith(x[:40]) or x.startswith(n[:40]) for x in passed)]
-            broke = [n for n in names if any(n.startswith(x[:40]) or x.startswith(n[:40]) for x in failed)]
-            flag = "⚠️ 空跑" if not broke else "✅ 有明確失敗"
-            if not broke: bad += 1
-            print(f"  {flag}　第 {sc['line']} 行起的情境（會送進場單）：失敗 {len(broke)} 項、仍通過 {len(still)} 項")
-            for n in still: print(f"      仍通過：{n}")
-    print("\n" + ("所有會送進場單的情境，在突變下都有明確失敗的項目" if not bad else f"{bad} 個情境在突變下沒有任何項目失敗 → 空跑，要補前提斷言"))
-    sys.exit(1 if bad else 0)
+        ok, bad = run(mod, None)
+        if bad: normal_fail[mod] = bad
+        passed[mod], failed[mod] = run(mod, "no_base")
+    for mod, bad in normal_fail.items():
+        problems.append(f"{mod} 正常情況就有 {len(bad)} 項失敗（先修好再做突變檢查）：{bad[:2]}")
+
+    used = set()
+    for mod in TESTS:
+        for name in passed[mod]:
+            keys = [k for k in EXEMPT if k[0] == mod and name.startswith(k[1])]
+            if not keys:
+                problems.append(f"⚠️ 空跑：{mod}「{name[:60]}」突變下仍通過，也不在豁免清單"); continue
+            k = keys[0]; used.add(k)
+            kind, arg = EXEMPT[k][0], EXEMPT[k][1]
+            if kind in ("前提", "對照組"):
+                ref_mod = EXEMPT[k][2] if len(EXEMPT[k]) > 2 else mod
+                if not match(arg, failed.get(ref_mod, [])):
+                    problems.append(f"⚠️ 豁免不成立：{mod}「{name[:40]}」引用的{kind}「{arg[:40]}」在突變下沒有失敗")
+    for k in EXEMPT:
+        if k not in used:
+            problems.append(f"清單過期：{k[0]}「{k[1][:40]}」突變下已不再通過（或已不存在），請從豁免清單刪掉")
+
+    total_pass = sum(len(v) for v in passed.values()); total_fail = sum(len(v) for v in failed.values())
+    print(f"突變 no_base：{len(TESTS)} 支測試，突變下失敗 {total_fail} 項、仍通過 {total_pass} 項（逐項比對豁免清單）")
+    for p in problems: print("  " + p)
+    print("通過：突變下仍通過的每一項都有理由，引用的前提／對照組都真的失敗" if not problems else f"共 {len(problems)} 個問題")
+    sys.exit(1 if problems else 0)
 
 if __name__ == "__main__":
     main()
