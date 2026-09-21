@@ -59,7 +59,7 @@ fx = fresh(); fx.slip = 0.0; p = own_pos(fx)                          # 打平�
 pp = dict(store.get()["open"]["XUSDT"])
 r, e = run(lambda: manager.close_now("XUSDT", pp, "停損"))
 rec = (store.get().get("closed") or [{}])[-1]
-last = fx.trades[-1]
+last = fx.trades[-1] if fx.trades else {"realizedPnl": "nan", "side": "", "commission": "0"}   # 先確認有東西（r35、r36）
 check("Q3", "（前提）打平出場：帳上成交價與出場價都是 1.0，最後那筆成交的 realizedPnl 真的是 0",
       pp["fill"] == 1.0 and float(last["realizedPnl"]) == 0 and last["side"] == "SELL", f"fill={pp['fill']} {last}")
 check("Q3", "打平出場的成交也要算（不能用 realizedPnl ≠ 0 篩平倉成交）：損益 = 0 − 手續費，來自成交明細",
@@ -77,7 +77,7 @@ check("Q3", "（前提）這一步完整走完：停損也移到成本、新停�
       f"stop={pp.get('stop')} want={pp.get('want_stop')}")
 parts = pp.get("partials") or []
 check("Q3", "1R 減碼記成一筆部分出場，損益用實際成交算", len(parts) == 1 and parts[0].get("pnl") is not None and
-      abs(parts[0]["pnl"] - round(seg_pnl(fx.trades[-1]), 2)) < 0.011, f"{parts}")
+      len(fx.trades) >= 1 and abs(parts[0]["pnl"] - round(seg_pnl(fx.trades[-1]), 2)) < 0.011, f"{parts}")
 
 # =====================================================================
 print("第 8 條 r30：成交明細的時間界線用「已採用的最後一筆」")
@@ -87,7 +87,7 @@ main._rc["t"] = 0; main.reconcile(force=True)
 fx.price = 0.90
 pp = dict(store.get()["open"]["XUSDT"])
 r, e = run(lambda: manager.close_now("XUSDT", pp, "時間"))           # 最後一段：在 0.90 附近平掉剩下的 60
-rec = (store.get().get("closed") or [{}])[-1]; t2 = fx.trades[-1]
+rec = (store.get().get("closed") or [{}])[-1]; t2 = fx.trades[-1] if fx.trades else {"id": None, "price": "nan"}
 check("Q4", "（前提）兩段真的都成交了，而且時間戳落在同一毫秒內也分得開（id 不同）", t1["id"] != t2["id"] and fx.qty("XUSDT", "LONG") == 0,
       f"t1={t1['time']} t2={t2['time']}")
 check("Q4", "出場價只看最後一段（0.899），不被前一段（1.20）拉偏", abs((rec.get("exit") or 0) - float(t2["price"])) < 1e-9,

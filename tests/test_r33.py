@@ -48,8 +48,9 @@ fx.price = 1.0; B.market_order("XUSDT", "BUY", 100)                 # 送出去�
 store.update(pending={"XUSDT": dict(engine="C", side="LONG", time="t", entry=1.0, stop=0.9, ts=None, base_qty=0)})
 main._rc["t"] = 0; main.reconcile(force=True)
 own = store.get().get("open", {}).get("XUSDT") or {}
-check("R3", "（前提）時間戳缺值、交易所上有部位 → 認領回來（走逐幣確認，不是當 0 歲卡住）", bool(own) and not store.get().get("pending"), f"own={bool(own)}")
-check("R3", "認領後的部位時間戳是數字（`.get(鍵, 預設)` 擋不住值是 None）", manager.num(own.get("ts")) is not None, f"ts={own.get('ts')}")
+# 這是要測的行為，不是前提（清單用法第 5 點 r36：前提是用來排除「沒走到」，不是用來放要測的東西）
+check("R3", "時間戳缺值、交易所上有部位 → 認領回來（走逐幣確認，不是當 0 歲卡住）", bool(own) and not store.get().get("pending"), f"own={bool(own)}")
+check("R3", "認領後的部位時間戳是數字（`.get(鍵, 預設)` 擋不住值是 None）", isinstance(own.get("ts"), (int, float)) and not isinstance(own.get("ts"), bool), f"ts={own.get('ts')}")   # 測試自己判斷，不借用被測程式的 num()
 fx.price = 0.95
 t, e = run(lambda: fx.trigger("XUSDT", "LONG", 100))
 t = t or {"price": "nan"}

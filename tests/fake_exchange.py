@@ -12,7 +12,8 @@
 - 突變：環境變數 PDH_MUTATE=no_base → 逐幣查詢一律回空清單（清單用法第 5 點 r18：驗證前提斷言有沒有空跑）
 - 成交價 ≠ 標記價（清單用法第 5 點 r30）：市價單成交價加滑價（買貴 slip、賣便宜 slip），部位均價＝成交價的加權平均，
   標記價＝self.price。兩者一樣時，測試分不出程式用的是成交價還是標記價。
-- 成交明細（userTrades）開倉、平倉都有，每筆有遞增 id、時間、手續費——跟真的一樣
+- 成交明細（userTrades）開倉、平倉都有，每筆有遞增 id、時間、手續費——跟真的一樣；
+  有筆數上限（預設 500、最多 1000），帶 fromId 時從那筆往後；交易所時鐘可以比本機慢（clock_offset_ms）
 另外可以注入：逾時、5xx、指定錯誤碼、「成交了但回應丟失」。
 """
 import json, os, socket, time, urllib.error, urllib.parse, urllib.request
@@ -39,6 +40,7 @@ class FakeBinance:
         self.slip = 0.001                # 市價單滑價比例
         self.fee = 0.0004                # 手續費率
         self.tid = 0
+        self.clock_offset_ms = 0         # 交易所時鐘比本機快（正）或慢（負）幾毫秒（清單第 8 條 r36）
         self.pos = {}                    # (symbol, "LONG"/"SHORT") -> [qty>0, entry]
         self.algo_orders = {}            # algoId -> dict
         self.legacy_orders = {}          # orderId -> dict（只有 algo="404" 的環境才收）
@@ -147,7 +149,10 @@ class FakeBinance:
         if path == "/fapi/v1/leverage": return {"leverage": int(p.get("leverage", 1))}
         if path == "/fapi/v1/userTrades":
             self.trade_queries.append(dict(symbol=p.get("symbol"), untraced=self.untraced(p.get("symbol"))))
-            return [t for t in self.trades if t["symbol"] == p.get("symbol")]
+            rows = [t for t in self.trades if t["symbol"] == p.get("symbol")]
+            limit = min(int(p.get("limit", 500)), 1000)             # 真的幣安：預設 500、最多 1000 筆
+            if "fromId" in p: return [t for t in rows if t["id"] >= int(p["fromId"])][:limit]   # 帶 fromId：從那筆往後
+            return rows[-limit:]                                     # 不帶：最近 limit 筆
         if path == "/fapi/v1/openAlgoOrders":
             if self.algo == "404": self._err(url, 404, "Not Found")
             return [o for o in self.algo_orders.values() if o["symbol"] == p.get("symbol", o["symbol"])]
@@ -214,7 +219,7 @@ class FakeBinance:
 
     def _trade(self, s, side, q, px, pnl, pos_side):
         self.tid += 1
-        self.trades.append(dict(id=self.tid, symbol=s, side=side, time=int(time.time() * 1000), qty=str(q), price=str(px),
+        self.trades.append(dict(id=self.tid, symbol=s, side=side, time=int(time.time() * 1000) + self.clock_offset_ms, qty=str(q), price=str(px),
                                 realizedPnl=str(round(pnl, 10)), commission=str(round(px * q * self.fee, 10)),
                                 positionSide=pos_side if self.hedge else "BOTH"))   # 真的幣安成交明細有這個欄位
 

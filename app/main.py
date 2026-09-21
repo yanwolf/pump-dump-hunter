@@ -529,6 +529,7 @@ def run():
         if _p.get("live"): print("套用實盤參數覆蓋:", _p.get("live_name") or "自訂", _p["live"])
     except Exception as e:
         print("preset boot:", e); store.push("errors", f"{time.strftime('%m-%d %H:%M')} 開機套用參數失敗 {e}")
+    if store.LOAD_ERROR: telegram.send(f"🐞 {store.LOAD_ERROR}")   # 狀態檔讀取失敗：開機就講（r36）
     threading.Thread(target=loop, daemon=True).start()
     port = int(os.environ.get("PORT", "8080")); print("listening", port)
     ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()

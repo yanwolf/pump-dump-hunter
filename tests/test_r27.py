@@ -60,7 +60,7 @@ bars = [dict(t=i * 300_000, o=1, h=1.0, l=0.95, c=1, v=1) for i in range(1, 5)]
 B.klines = lambda *a, **k: list(bars)
 manager._now = lambda: 10**15
 manager.run()
-check("P3", "（前提）出場判斷真的跑了（K 棒有處理）", (store.get().get("open", {}).get("XUSDT") or {}).get("last_t") == bars[-1]["t"],
+check("P3", "（前提）出場判斷真的跑了（K 棒有處理）", bars and (store.get().get("open", {}).get("XUSDT") or {}).get("last_t") == bars[-1]["t"],
       f"last_t={(store.get().get('open', {}).get('XUSDT') or {}).get('last_t')}")
 check("P3", "last_t 是 None → 出場判斷不拋錯", not any("出場判斷出錯" in m for m in TG), f"{TG}")
 

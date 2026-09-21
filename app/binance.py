@@ -135,9 +135,12 @@ def round_qty(symbol, qty):
 def round_price(symbol, price):
     return _fmt(price, filters(symbol)["tick"], down=False)
 
-def user_trades(symbol, limit=50):
-    """最近成交明細（含 realizedPnl、commission），平倉後拿實際出場價用。"""
-    return _get("/fapi/v1/userTrades", dict(symbol=symbol, limit=limit), signed=True)
+def user_trades(symbol, limit=1000, from_id=None):
+    """成交明細（含 realizedPnl、commission、positionSide）。帶 from_id 時從那一筆往後（清單第 8 條 r35：
+    不帶時只回最近 limit 筆，持倉期間成交一多，界線之後的平倉成交會掉出範圍）。"""
+    p = dict(symbol=symbol, limit=limit)
+    if from_id is not None: p["fromId"] = int(from_id)
+    return _get("/fapi/v1/userTrades", p, signed=True)
 
 # ---- 下單（testnet / live 由 USE_TESTNET 決定）----
 _mode = dict(hedge=None, t=0)

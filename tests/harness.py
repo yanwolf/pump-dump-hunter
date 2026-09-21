@@ -11,7 +11,7 @@ test_r12 那份結尾根本沒有「沒有程式錯誤被吞掉」的全域檢�
 
 自我驗證：python -m tests.harness_selftest
 """
-import os, re, sys, tempfile, time
+import json, os, re, sys, tempfile, time
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp())
 os.environ["TRADE"] = "1"
 from app import config as C
@@ -28,7 +28,8 @@ manager.telegram.send = telegram.send; main.telegram.send = telegram.send
 
 # 情境會換掉的模組層級物件：fresh() 一律還原（第 14 種）。新增要換的東西時加在這裡，tests/check_tests.py 也看這份清單
 RESET_ATTRS = [(B, "klines"), (B, "_get"), (manager, "_now"), (manager, "retry_stop"), (manager, "record_close"),
-               (manager, "close_now"), (main.scanner, "scan"), (main, "reconcile"), (main, "tick"), (store, "push")]
+               (manager, "close_now"), (main.scanner, "scan"), (main, "reconcile"), (main, "tick"), (store, "push"),
+               (json, "dump")]                   # 全域的 json 模組：換掉它會影響所有模組，更要還原
 RESET_ATTRS = [(m, a) for m, a in RESET_ATTRS if hasattr(m, a)]   # 在舊版程式上重跑測試時（清單用法第 5 點 r32），略過不存在的
 ORIG = {(id(m), a): getattr(m, a) for m, a in RESET_ATTRS}
 
@@ -52,6 +53,8 @@ def selftest_modules():
     saved, canary = STDERR.lines, []
     STDERR.lines = canary
     try:
+        # 在舊版程式上重跑時（清單用法第 5 點 r35），那個版本可能還沒有這些函式：有才做，沒有就不算攔到（前提照樣會失敗，但框架不崩）
+        if not (hasattr(manager, "_step_err") and hasattr(main, "_loop_step")): raise LookupError("舊版程式沒有 _step_err／_loop_step")
         manager._step_err("SELFTEST", "框架自檢", RuntimeError("manager 自檢錯誤"))
         if any("manager 自檢錯誤" in x for x in store.get().get("errors", [])[mark_e:]): got.add("manager")
         main._loop_step("框架自檢", lambda: (_ for _ in ()).throw(RuntimeError("main 自檢錯誤")))
@@ -59,6 +62,7 @@ def selftest_modules():
         th = threading.Thread(target=lambda: (_ for _ in ()).throw(RuntimeError("執行緒金絲雀")), name="金絲雀")
         th.start(); th.join()
         if any("執行緒金絲雀" in x for x in canary) and any("Exception in thread" in x for x in canary): got.add("thread")
+    except LookupError: pass
     finally:
         STDERR.lines = saved
     from app import presets
@@ -67,7 +71,8 @@ def selftest_modules():
     presets.set_live({"SCAN.watch_chg24": 15}); presets.apply_live()
     presets.C.apply_overrides = orig; presets.set_live({}); presets.apply_live()
     if any("presets 自檢錯誤" in x for x in store.get().get("errors", [])): got.add("presets")
-    manager._errs.clear(); main._loop_errs.clear()
+    for mod, name in ((manager, "_errs"), (main, "_loop_errs")):          # 有才清（舊版程式上重跑，r35）
+        if hasattr(mod, name): getattr(mod, name).clear()
     return got
 _counts = dict(checks=0, positive=0)
 

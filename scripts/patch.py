@@ -26,6 +26,11 @@ def apply(edits):
         if new != "" and old.endswith("\n") != new.endswith("\n"):     # 整段刪除（替換成空字串）不檢查（清單用法第 5 點 r32）
             raise PatchAbort(f"❌ apply 中止（一個檔都沒寫）：第 {i} 處 {path} 舊字串與新字串結尾換行不一致，下一行會黏上來\n   比對字串開頭：{head}")
         buf[path] = s.replace(old, new)
+    for path, s in buf.items():                     # 寫入前先編譯（清單用法第 5 點 r35）：全部命中、寫進去之後才發現語法錯，檔案已經壞了
+        if path.endswith(".py"):
+            try: compile(s, path, "exec")
+            except SyntaxError as e:
+                raise PatchAbort(f"❌ apply 中止（一個檔都沒寫）：{path} 改完後有語法錯（第 {e.lineno} 行：{e.msg}）")
     for path, s in buf.items(): open(path, "w", encoding="utf-8").write(s)
     return len(edits)
 
@@ -44,6 +49,11 @@ def self_test():
     except PatchAbort as e: results.append((f"同檔依序套用、跨檔一次寫入（{e}）", False))
     try: apply([(a, "丙", "三", 2)]); results.append(("次數不對 → 中止", False))
     except PatchAbort: results.append(("次數不對 → 中止", True))
+    pa, pb = os.path.join(d, "a.py"), os.path.join(d, "b.py")
+    open(pa, "w").write("x = 1\n"); open(pb, "w").write("y = 2\n")
+    try: apply([(pa, "x = 1", "x = 2"), (pb, "y = 2", "y = (2")]); results.append(("改完有語法錯 → 中止", False))
+    except PatchAbort: results.append(("改完有語法錯 → 中止", True))
+    results.append(("語法錯中止後，另一個 .py 也沒被改動", open(pa).read() == "x = 1\n" and open(pb).read() == "y = 2\n"))
     open(b, "w").write("第一行\n要刪的一行\n第三行\n")
     try: apply([(b, "要刪的一行\n", "")]); results.append(("整段刪除（換成空字串）不被換行檢查擋下", open(b).read() == "第一行\n第三行\n"))
     except PatchAbort as e: results.append((f"整段刪除（換成空字串）不被換行檢查擋下（{e}）", False))

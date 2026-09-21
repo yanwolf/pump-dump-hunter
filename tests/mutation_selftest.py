@@ -3,7 +3,7 @@
 在專案根目錄執行：python -m tests.mutation_selftest
 """
 import sys
-from tests.mutation_check import evaluate, parse
+from tests.mutation_check import crashed_in_test, evaluate, parse
 
 M = "tests.fake"
 fails = []
@@ -29,6 +29,20 @@ expect("豁免清單有、但測試裡已沒有這一項 → 清單過期", [], 
 expect("正常情況就失敗 → 報問題", [(True, "甲", 0)], {}, "正常情況", normal={M: ["甲"]})
 expect("沒有印命中次數 → 報問題（避免舊格式測試靜靜被當成無關）", [(True, "甲", None)], {}, "沒有命中次數")
 expect("解析到的項目太少 → 報問題（檢查本身不能空跑，第 19 種）", [(True, "甲", 0)], {}, "只解析到", min_items=5)
+problems, _ = evaluate({M: [(True, "甲", 0)]}, {M: []}, {}, min_items=0, crashes={(M, "突變下"): "test_x.py:12"})
+ok = any("測試本身崩掉" in p and "test_x.py:12" in p for p in problems)
+print(f"  {'✅' if ok else '❌'} 突變下測試本身崩掉 → 報出來（含位置）" + ("" if ok else f"　{problems}"))
+if not ok: fails.append("crash")
+tb_test = 'Traceback (most recent call last):\n  File "/x/app/main.py", line 5, in f\n  File "/x/tests/test_r9.py", line 12, in <module>\nKeyError: 1\n'
+tb_app = 'Traceback (most recent call last):\n  File "/x/tests/test_r9.py", line 12, in <module>\n  File "/x/app/main.py", line 5, in f\nKeyError: 1\n'
+ok = crashed_in_test(tb_test) == "test_r9.py:12" and crashed_in_test(tb_app) is None and crashed_in_test("") is None
+print(f"  {'✅' if ok else '❌'} traceback 最後一層在 tests/ 才算測試本身崩掉（在 app/ 是被測程式拋錯）")
+if not ok: fails.append("crash-parse")
+from tests.mutation_check import crash_of
+canary = 'Exception in thread 金絲雀:\nTraceback (most recent call last):\n  File "/x/tests/harness.py", line 59, in <lambda>\nRuntimeError: 執行緒金絲雀\n'
+ok = crash_of(1, "  ❌ [A] 甲\n\n1 項失敗：[\'A\']\n", canary) is None and crash_of(1, "  ❌ [A] 甲\n", tb_test) == "test_r9.py:12"
+print(f"  {'✅' if ok else '❌'} 有印出總結時，金絲雀的 traceback 不算崩掉；沒印出總結才算")
+if not ok: fails.append("crash-canary")
 # 解析器
 rows = parse("  ✅ [K2] 甲　細節〔命中3〕\n  ❌ [K2] 乙〔命中0〕\n  ✅ [K2] 丙　x\n  ✅ [K2] 丁〔命中0〕〔基礎設施〕\n")
 ok = rows == [(True, "甲", 3), (False, "乙", 0), (True, "丙", None), (True, "丁", 0)]

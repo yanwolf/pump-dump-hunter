@@ -38,11 +38,15 @@ for t in tests:
 # 3. 檢查器與它們的自我驗證
 for name, args in [("測試框架自我驗證", ["-m", "tests.harness_selftest"]),
                    ("測試靜態檢查（含金絲雀）", ["-m", "tests.check_tests"]),
+                   ("先索引沒先確認：自我驗證", ["-m", "tests.check_indexing", "--self-test"]),
+                   ("先索引沒先確認（含前提本身）", ["-m", "tests.check_indexing"]),
                    ("回傳原因語法樹檢查：自我驗證", ["-m", "scripts.check_returns", "--self-test"]),
                    ("回傳原因語法樹檢查", ["-m", "scripts.check_returns"]),
                    ("改寫工具 apply() 自我驗證", ["-m", "scripts.patch"]),
                    ("突變檢查器自我驗證", ["-m", "tests.mutation_selftest"]),
-                   ("逐項突變檢查", ["-m", "tests.mutation_check"])]:
+                   ("逐項突變檢查", ["-m", "tests.mutation_check"]),
+                   ("全部測試跑上一版程式：框架崩掉 0 支（需要 PDH_PREV 指向上一版目錄，沒設就略過）",
+                    ["-c", "import os,subprocess,sys; p=os.environ.get('PDH_PREV'); sys.exit(subprocess.call([sys.executable,'-m','tests.rerun_old',p]) if p else 0)"])]:
     code, out = sh(*args)
     step(name, code == 0, out.strip().splitlines()[-1][:90] if out.strip() else "（沒有輸出）")
 

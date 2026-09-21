@@ -12,17 +12,32 @@
 """
 import os, re, subprocess, sys
 
-TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27", "tests.test_r30", "tests.test_r33"]
+TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27", "tests.test_r30", "tests.test_r33", "tests.test_r36"]
 LINE = re.compile(r"^  (✅|❌) \[[^\]]+\] (.+?)(?:　.*?)?(?:〔命中(\d+)〕)?(?:〔基礎設施〕)?$", re.M)
 
 def parse(stdout):
     """回傳 [(通過?, 名稱, 命中次數)]"""
     return [(s == "✅", n, int(h) if h else None) for s, n, h in LINE.findall(stdout)]
 
-def evaluate(mut, normal_fail, exempt, min_items=5):
+def crashed_in_test(stderr):
+    """traceback 的最後一層在 tests/ 裡 → 是測試程式本身拋錯（不是被測程式）。回傳那一層的描述或 None（清單用法第 5 點 r35、r36）。"""
+    frames = re.findall(r'File "([^"]+)", line (\d+)', stderr or "")
+    if not frames or "Traceback" not in stderr: return None
+    path, line = frames[-1]
+    return f"{path.split('/tests/')[-1]}:{line}" if "/tests/" in path.replace("\\", "/") else None
+
+def crash_of(returncode, stdout, stderr):
+    """真的崩掉 = 結束碼非 0 而且沒印出最後的總結（finish() 沒跑到）。只看結束碼加 traceback，
+    會把框架故意製造的金絲雀（背景執行緒的 traceback，最後一層在 tests/harness.py）誤判成崩掉。"""
+    finished = "全部通過" in stdout or re.search(r"\d+ 項失敗", stdout)
+    return crashed_in_test(stderr) if returncode != 0 and not finished else None
+
+def evaluate(mut, normal_fail, exempt, min_items=5, crashes=None):
     """純函式。mut: {模組: [(通過?, 名稱, 命中)]}（突變下的結果）；normal_fail: {模組: [失敗名稱]}；
     exempt: {(模組, 名稱開頭): (種類, 引用, [引用模組])}。回傳 (問題清單, 統計)。"""
     problems, used, auto = [], set(), 0
+    for (mod, mode), where in (crashes or {}).items():
+        if where: problems.append(f"⚠️ 測試本身崩掉：{mod}（{mode}）在 {where} 拋錯——後面的項目全部沒跑")
     for mod, items in mut.items():
         if len(items) < min_items: problems.append(f"{mod} 在突變下只解析到 {len(items)} 項（輸出格式變了？檢查本身不能空跑，第 19 種）")
     for mod, bad in normal_fail.items():
@@ -57,15 +72,16 @@ def run(module, mutate):
     env = dict(os.environ); env.pop("PDH_MUTATE", None)
     if mutate: env["PDH_MUTATE"] = mutate
     p = subprocess.run([sys.executable, "-m", module], env=env, capture_output=True, text=True, timeout=300)
-    return parse(p.stdout)
+    return parse(p.stdout), crash_of(p.returncode, p.stdout, p.stderr)
 
 def main():
     from tests.mutation_exempt import EXEMPT
-    normal_fail, mut = {}, {}
+    normal_fail, mut, crashes = {}, {}, {}
     for mod in TESTS:
-        normal_fail[mod] = [n for ok, n, _ in run(mod, None) if not ok]
-        mut[mod] = run(mod, "no_base")
-    problems, st = evaluate(mut, normal_fail, EXEMPT)
+        rows, c1 = run(mod, None); normal_fail[mod] = [n for ok, n, _ in rows if not ok]
+        mut[mod], c2 = run(mod, "no_base")
+        crashes[(mod, "正常")], crashes[(mod, "突變下")] = c1, c2
+    problems, st = evaluate(mut, normal_fail, EXEMPT, crashes=crashes)
     print(f"突變 no_base：{len(TESTS)} 支測試，突變下失敗 {st['failed']} 項、仍通過 {st['passed']} 項"
           f"（命中 0 次自動判定無關 {st['auto']} 項、人工豁免 {st['manual']} 項）")
     for p in problems: print("  " + p)

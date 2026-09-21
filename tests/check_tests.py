@@ -67,7 +67,7 @@ def check_source(src, resets):
                         name = attr_name(t)
                         if name and name.split(".")[0] in SHARED and name not in ALLOW:
                             norm = name[len("manager."):] if name.startswith("manager.B.") else name
-                            if norm not in resets: out.append(f"第 {s['line']} 行起：換掉了 {name}，但框架的 RESET_ATTRS 沒有它（第 14 種）")
+                            if norm not in resets and ".".join(name.split(".")[-2:]) not in resets: out.append(f"第 {s['line']} 行起：換掉了 {name}，但框架的 RESET_ATTRS 沒有它（第 14 種）")
                 if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "check" and len(sub.args) >= 3:
                     checks += 1
                     desc = sub.args[1].value if isinstance(sub.args[1], ast.Constant) else ""
