@@ -141,7 +141,7 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
    (cur&&!ex.some(p=>p.symbol===cur)?`<option value="${cur}">${cur}（已不在帳號）</option>`:'');
  $('mx').value=cur;
  $('t_rest').innerHTML=`
- <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','fill','exit','pnl','r','qty','by'])}</div>
+ <div class=card><h2>已平倉 · 最新在上${(s.closed||[]).some(x=>x.pnl==null)?` <span class=meta>（其中 ${(s.closed||[]).filter(x=>x.pnl==null).length} 筆損益未知，不算進任何加總）</span>`:''}</h2>${T((s.closed||[]).slice().reverse().slice(0,30).map(x=>x.pnl==null?{...x,pnl:'未知'}:x),['closed','symbol','engine','side','fill','exit','pnl','r','qty','by'])}</div>
  <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
    ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','stop_error','reason'])}</div>`}
 

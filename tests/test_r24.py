@@ -1,49 +1,12 @@
 # 清單 r22 → r24 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安。
 # 在專案根目錄執行：python -m tests.test_r24
-import os, sys, tempfile, time
-os.environ["DATA_DIR"] = tempfile.mkdtemp()
-os.environ["TRADE"] = "1"
-from app import config as C
-C.API_KEY = "k"; C.API_SECRET = "s"; C.USE_TESTNET = True
-from app import binance as B, store, telegram
-from tests.fake_exchange import FakeBinance
+from tests.harness import (ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
+                           re, run, since, store, sys, telegram, time)   # 共用案例框架（清單用法第 5 點 r27）；明列名稱，pyflakes 才查得到未定義名稱
 
-TG = []
-telegram.send = lambda m: TG.append(m)
-time.sleep = lambda s: None
-from app import manager, main
-manager.telegram.send = telegram.send; main.telegram.send = telegram.send
-ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.retry_stop, record_close=manager.record_close,
-            scan=main.scanner.scan, reconcile=main.reconcile, push=store.push, close_now=manager.close_now,
-            tick=getattr(main, "tick", None))
 
-fails = []
-def check(tag, name, cond, detail=""):
-    hits = getattr(FakeBinance, "current", None)
-    hits = f"〔命中{hits.mut_hits}〕" if hits is not None and hasattr(hits, "mut_hits") else ""
-    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
-    if not cond: fails.append(tag)
 
-ALL_ERR = []
-def fresh(hedge=False, algo="ok"):
-    ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
-    fx = FakeBinance(hedge=hedge, algo=algo).install()
-    B._mode.update(hedge=None, t=0); B._F.clear(); B._algo.update(legacy_until=0.0)
-    main._rc["t"] = 0
-    B.klines = ORIG["klines"]; B._get = ORIG["_get"]; manager._now = ORIG["now"]; manager.retry_stop = ORIG["retry_stop"]
-    manager.record_close = ORIG["record_close"]; main.scanner.scan = ORIG["scan"]; main.reconcile = ORIG["reconcile"]
-    store.push = ORIG["push"]; manager.close_now = ORIG["close_now"]
-    if ORIG["tick"]: main.tick = ORIG["tick"]
-    manager._errs.clear(); main._loop_errs.clear(); manager._missing.clear()
-    store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[])
-    TG.clear()
-    return fx
 
-def run(fn):
-    try: return fn(), None
-    except Exception as e: return None, e
 
-def since(fx, mark): return fx.calls[mark:]
 EMPTY_ONE = lambda times=50: dict(path="/fapi/v2/positionRisk", match=lambda p: "symbol" in p, times=times, kind="empty")
 
 def own_pos(fx, sym="XUSDT", qty=100, base=0, side="LONG", stop=0.9, stop_on_exchange=True, **extra):
@@ -79,7 +42,7 @@ check("N2", "停損在 → 回傳「present」", r == "present", f"回傳={r} er
 print("第 8 條 r24：結帳要排在最前面，撤單、通知、算損益出錯都不能讓這筆結不了帳")
 fx = fresh(); so = own_pos(fx, want_stop="abc", want_fail=2)            # 資料壞掉：想要的停損價不是數字 → 收尾通知格式化會出錯
 main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))       # 交易所上已經沒有這個部位
-check("N5", "（前提）對帳真的走到結帳（交易所上沒有這個部位）", not any(p["symbol"] == "XUSDT" for p in fx.rows()))
+check("N5", "（前提）對帳真的走到結帳（交易所上沒有這個部位）", not any(p["symbol"] == "XUSDT" for p in fx.rows()), infra=True)
 check("N5", "收尾通知格式化出錯 → 平倉紀錄照樣寫進去", len(store.get().get("closed") or []) == 1, f"closed={len(store.get().get('closed') or [])} err={e}")
 check("N5", "收尾通知格式化出錯 → 部位移出帳上", "XUSDT" not in store.get().get("open", {}))
 check("N5", "撤停損照樣做（排在結帳之後，各自 try）", so["stop_id"] not in fx.algo_orders)
@@ -122,12 +85,5 @@ check("N6", "手動平倉在結帳前出錯 → 記待平倉（使用者要平�
 check("N6", "停損沒被撤", so["stop_id"] in fx.algo_orders)
 
 # =====================================================================
-print("用法第 5 點：通知在 try 裡的錯誤不能被吞")
-fresh()                                                  # 全域檢查自成一個情境：不繼承上一個情境的突變命中次數（fresh 會先收集錯誤區與推播）
-check("H10", "（前提）有收集到各情境的錯誤區與推播", len(ALL_ERR) > 0)
-bugs = [x for x in ALL_ERR if any(k in x for k in ("NameError", "AttributeError", "TypeError", "KeyError", "is not defined"))
-        and "abc" not in x and "entry" not in x]
-check("H10", "所有情境裡沒有非注入的程式錯誤", not bugs, f"{bugs[:3]}")
 
-print("\n全部通過" if not fails else f"\n{len(fails)} 項失敗：{sorted(set(fails))}")
-sys.exit(1 if fails else 0)
+finish(allowed=('abc', 'entry'))   # 本檔刻意注入的錯誤字串；其餘程式錯誤一律算失敗

@@ -7,8 +7,8 @@ from tests.mutation_check import evaluate, parse
 
 M = "tests.fake"
 fails = []
-def expect(name, mut, exempt, want, normal=None):
-    problems, _ = evaluate({M: mut}, normal or {M: []}, exempt)
+def expect(name, mut, exempt, want, normal=None, min_items=0):
+    problems, _ = evaluate({M: mut}, normal or {M: []}, exempt, min_items=min_items)
     got = [p for p in problems if want in p] if want else problems
     ok = bool(got) if want else not problems
     print(f"  {'✅' if ok else '❌'} {name}" + ("" if ok else f"　問題={problems}"))
@@ -28,15 +28,16 @@ expect("豁免清單有、但那一項命中 0 次 → 清單過期（已自動�
 expect("豁免清單有、但測試裡已沒有這一項 → 清單過期", [], {(M, "不存在"): ("前提", "乙")}, "清單過期")
 expect("正常情況就失敗 → 報問題", [(True, "甲", 0)], {}, "正常情況", normal={M: ["甲"]})
 expect("沒有印命中次數 → 報問題（避免舊格式測試靜靜被當成無關）", [(True, "甲", None)], {}, "沒有命中次數")
+expect("解析到的項目太少 → 報問題（檢查本身不能空跑，第 19 種）", [(True, "甲", 0)], {}, "只解析到", min_items=5)
 # 解析器
-rows = parse("  ✅ [K2] 甲　細節〔命中3〕\n  ❌ [K2] 乙〔命中0〕\n  ✅ [K2] 丙　x\n")
-ok = rows == [(True, "甲", 3), (False, "乙", 0), (True, "丙", None)]
+rows = parse("  ✅ [K2] 甲　細節〔命中3〕\n  ❌ [K2] 乙〔命中0〕\n  ✅ [K2] 丙　x\n  ✅ [K2] 丁〔命中0〕〔基礎設施〕\n")
+ok = rows == [(True, "甲", 3), (False, "乙", 0), (True, "丙", None), (True, "丁", 0)]
 print(f"  {'✅' if ok else '❌'} 解析：名稱、細節、命中次數分得開　{rows if not ok else ''}")
 if not ok: fails.append("parse")
 
 # 跨模組那一組要用兩個模組才驗得到：引用的那邊失敗 → 成立
 problems, _ = evaluate({M: [(True, "甲", 2)], "tests.other": [(False, "丙", 1)]}, {M: [], "tests.other": []},
-                       {(M, "甲"): ("對照組", "丙", "tests.other")})
+                       {(M, "甲"): ("對照組", "丙", "tests.other")}, min_items=0)
 ok = not problems
 print(f"  {'✅' if ok else '❌'} 跨模組對照組：引用的那邊在突變下失敗 → 成立" + ("" if ok else f"　{problems}"))
 if not ok: fails.append("cross")

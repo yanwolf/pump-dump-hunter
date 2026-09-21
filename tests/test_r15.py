@@ -1,50 +1,12 @@
 # 清單 r13 → r15 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安。
 # 在專案根目錄執行：python -m tests.test_r15
-import os, sys, tempfile, time
-os.environ["DATA_DIR"] = tempfile.mkdtemp()
-os.environ["TRADE"] = "1"
-from app import config as C
-C.API_KEY = "k"; C.API_SECRET = "s"; C.USE_TESTNET = True
-from app import binance as B, store, telegram
-from tests.fake_exchange import FakeBinance
+from tests.harness import (ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
+                           re, run, since, store, sys, telegram, time)   # 共用案例框架（清單用法第 5 點 r27）；明列名稱，pyflakes 才查得到未定義名稱
 
-TG = []
-telegram.send = lambda m: TG.append(m)
-time.sleep = lambda s: None
-from app import manager, main
-manager.telegram.send = telegram.send; main.telegram.send = telegram.send
-ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.retry_stop, record_close=manager.record_close,
-            scan=main.scanner.scan, reconcile=main.reconcile, push=store.push)
 
-fails = []
-def check(tag, name, cond, detail=""):
-    fx_now = getattr(FakeBinance, "current", None)       # 印出這個情境到目前為止的突變命中次數，給 mutation_check 自動判定「無關」
-    hits = f"〔命中{fx_now.mut_hits}〕" if fx_now is not None else ""
-    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
-    if not cond: fails.append(tag)
 
-ALL_ERR = []                                          # 每個情境的錯誤區與推播都收起來，最後檢查有沒有程式錯誤
-def fresh(hedge=False, algo="ok"):
-    ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
-    fx = FakeBinance(hedge=hedge, algo=algo).install()
-    B._mode.update(hedge=None, t=0); B._F.clear(); B._algo.update(legacy_until=0.0)
-    main._rc["t"] = 0; manager._missing.clear()
-    store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[])
-    # 第 14 種：情境可能換掉模組層級的函式、留下計數器；中途出錯時還原那行不一定走得到，一律在這裡重設
-    B.klines = ORIG["klines"]; B._get = ORIG["_get"]; manager._now = ORIG["now"]; manager.retry_stop = ORIG["retry_stop"]
-    manager.record_close = ORIG["record_close"]; main.scanner.scan = ORIG["scan"]; main.reconcile = ORIG["reconcile"]
-    store.push = ORIG["push"]
-    manager._errs.clear(); main._loop_errs.clear(); manager._missing.clear()
-    TG.clear()
-    return fx
 
-def run(fn):
-    try: return fn(), None
-    except Exception as e: return None, e
 
-def since(fx, mark):
-    """第 7 種測錯方式：只算測試動作開始之後的呼叫。"""
-    return fx.calls[mark:]
 
 def market_closes(calls):
     return [c for c in calls if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"
@@ -202,11 +164,5 @@ n2 = len(market_closes(since(fx, mark)))
 check("H7", "待平倉期間每輪只送一張平倉單（出場判斷不再觸發）", n2 == 1, f"第 2 輪送了 {n2} 張")
 
 # =====================================================================
-print("用法第 5 點 r15：通知在 try 裡的錯誤不能被吞")
-fresh()                                                  # 全域檢查自成一個情境：不繼承上一個情境的突變命中次數（fresh 會先收集錯誤區與推播）
-bugs = [x for x in ALL_ERR if any(k in x for k in ("NameError", "AttributeError", "TypeError", "KeyError", "is not defined"))]
-check("H10", "（前提）有收集到各情境的錯誤區與推播", len(ALL_ERR) > 0)
-check("H10", "所有情境的錯誤區與推播裡，沒有程式錯誤", not bugs, f"{bugs[:3]}")
 
-print("\n全部通過" if not fails else f"\n{len(fails)} 項失敗：{sorted(set(fails))}")
-sys.exit(1 if fails else 0)
+finish(allowed=())   # 本檔刻意注入的錯誤字串；其餘程式錯誤一律算失敗

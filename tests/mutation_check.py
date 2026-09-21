@@ -12,17 +12,19 @@
 """
 import os, re, subprocess, sys
 
-TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24"]
-LINE = re.compile(r"^  (✅|❌) \[[^\]]+\] (.+?)(?:　.*?)?(?:〔命中(\d+)〕)?$", re.M)
+TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27"]
+LINE = re.compile(r"^  (✅|❌) \[[^\]]+\] (.+?)(?:　.*?)?(?:〔命中(\d+)〕)?(?:〔基礎設施〕)?$", re.M)
 
 def parse(stdout):
     """回傳 [(通過?, 名稱, 命中次數)]"""
     return [(s == "✅", n, int(h) if h else None) for s, n, h in LINE.findall(stdout)]
 
-def evaluate(mut, normal_fail, exempt):
+def evaluate(mut, normal_fail, exempt, min_items=5):
     """純函式。mut: {模組: [(通過?, 名稱, 命中)]}（突變下的結果）；normal_fail: {模組: [失敗名稱]}；
     exempt: {(模組, 名稱開頭): (種類, 引用, [引用模組])}。回傳 (問題清單, 統計)。"""
     problems, used, auto = [], set(), 0
+    for mod, items in mut.items():
+        if len(items) < min_items: problems.append(f"{mod} 在突變下只解析到 {len(items)} 項（輸出格式變了？檢查本身不能空跑，第 19 種）")
     for mod, bad in normal_fail.items():
         if bad: problems.append(f"{mod} 正常情況就有 {len(bad)} 項失敗（先修好再做突變檢查）：{bad[:2]}")
     failed = {m: [n for ok, n, _ in items if not ok] for m, items in mut.items()}

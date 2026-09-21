@@ -105,8 +105,9 @@ def reconcile(force=False):
                 if rec.get("qty") and left < rec["qty"] - 1e-9:          # 數量變少：記部分出場（清單第 8 條 r12，已扣基準）
                     px = float(row.get("markPrice") or row.get("entryPrice") or 0) or None
                     cut = rec["qty"] - left
-                    est = round((px - rec.get("fill", rec["entry"])) * cut * (1 if rec["side"] == "LONG" else -1), 2) if px else None
-                    rec = dict(rec, qty=left, partials=rec.get("partials", []) + [dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=est or 0)])
+                    ref = manager.num(rec.get("fill"))   # 只用實際成交價；訊號價不是成交價，拿它估出來的「損益」是假的已知（r27）
+                    est = round((px - ref) * cut * (1 if rec["side"] == "LONG" else -1), 2) if px and ref else None
+                    rec = dict(rec, qty=left, partials=(rec.get("partials") or []) + [dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=est)])   # 算不出就是 None，不是 0
                     changed = True
                     telegram.send(f"✂️ {sym} 引擎{rec.get('engine')} 交易所上的數量減少 {rec['qty'] + cut:g} → {left:g}"
                                   f"（不是本程式送的單，可能是在 App 手動減碼），已記一筆部分出場並更新帳上數量")
@@ -114,7 +115,8 @@ def reconcile(force=False):
             else:
                 rec = manager.record_close(sym, rec, "停損單"); changed = True
                 _say(lambda: f"🏁 {sym} 引擎{rec.get('engine')} 停損單觸發出場" +
-                              (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
+                              (f" @ {rec['exit']:.6g}" if manager.num(rec.get("exit")) else "") +
+                              (f"，損益 {rec['pnl']:+.2f} U" if manager.num(rec.get("pnl")) is not None else "，損益未知") +
                               (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else ""), sym)
             manager._step_ok(sym, "對帳")
         except Exception as e:

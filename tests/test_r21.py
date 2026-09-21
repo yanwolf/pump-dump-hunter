@@ -1,49 +1,12 @@
 # 清單 r19 → r21 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安。
 # 在專案根目錄執行：python -m tests.test_r21
-import os, re, sys, tempfile, time
-os.environ["DATA_DIR"] = tempfile.mkdtemp()
-os.environ["TRADE"] = "1"
-from app import config as C
-C.API_KEY = "k"; C.API_SECRET = "s"; C.USE_TESTNET = True
-from app import binance as B, store, telegram
-from tests.fake_exchange import FakeBinance
+from tests.harness import (ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
+                           re, run, since, store, sys, telegram, time)   # 共用案例框架（清單用法第 5 點 r27）；明列名稱，pyflakes 才查得到未定義名稱
 
-TG = []
-telegram.send = lambda m: TG.append(m)
-time.sleep = lambda s: None
-from app import manager, main
-manager.telegram.send = telegram.send; main.telegram.send = telegram.send
-ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.retry_stop, record_close=manager.record_close,
-            scan=main.scanner.scan, reconcile=main.reconcile, push=store.push)
 
-fails = []
-def check(tag, name, cond, detail=""):
-    fx_now = getattr(FakeBinance, "current", None)       # 印出這個情境到目前為止的突變命中次數，給 mutation_check 自動判定「無關」
-    hits = f"〔命中{fx_now.mut_hits}〕" if fx_now is not None else ""
-    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
-    if not cond: fails.append(tag)
 
-ALL_ERR = []
-def fresh(hedge=False, algo="ok"):
-    """每個情境都從乾淨狀態開始：模擬交易所、快取、模組層級的計數器與被換掉的函式都重設（清單用法第 5 點第 14 種）。"""
-    ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
-    fx = FakeBinance(hedge=hedge, algo=algo).install()
-    B._mode.update(hedge=None, t=0); B._F.clear(); B._algo.update(legacy_until=0.0)
-    main._rc["t"] = 0
-    # 第 14 種：情境可能換掉模組層級的函式、留下計數器；中途出錯時還原那行不一定走得到，一律在這裡重設
-    B.klines = ORIG["klines"]; B._get = ORIG["_get"]; manager._now = ORIG["now"]; manager.retry_stop = ORIG["retry_stop"]
-    manager.record_close = ORIG["record_close"]; main.scanner.scan = ORIG["scan"]; main.reconcile = ORIG["reconcile"]
-    store.push = ORIG["push"]
-    manager._errs.clear(); main._loop_errs.clear(); manager._missing.clear()
-    store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[])
-    TG.clear()
-    return fx
 
-def run(fn):
-    try: return fn(), None
-    except Exception as e: return None, e
 
-def since(fx, mark): return fx.calls[mark:]
 def stop_posts(calls): return [c for c in calls if c[0] == "POST" and c[1] in ("/fapi/v1/algoOrder",) ]
 EMPTY_ONE = lambda times=50: dict(path="/fapi/v2/positionRisk", match=lambda p: "symbol" in p, times=times, kind="empty")
 
@@ -91,14 +54,24 @@ print("第 8 條 r21：對帳的逐部位迴圈、通知都要各自 try（出�
 fx = fresh(); fx.open("XUSDT", "LONG", 100)
 own_pos(fx, sym="AUSDT"); own_pos(fx, sym="XUSDT")               # A 在前面、交易所上已沒了；X 還在
 CALLED = []
+real_close = manager.record_close                                 # 換掉之前先保存（框架的 ORIG 以（模組, 屬性）為鍵）
 def bad_close(sym, pos, by, info=None):
     CALLED.append(sym)
-    if sym == "AUSDT": return dict(pos, symbol=sym, exit="n/a", pnl=1.0)   # exit 不是數字 → 通知格式化時會出錯
-    return ORIG["record_close"](sym, pos, by, info)
+    if sym == "AUSDT": return dict(pos, symbol=sym, exit=1.0, pnl=1.0)
+    return real_close(sym, pos, by, info)
 manager.record_close = bad_close
+# 讓 A 的平倉通知送出時失敗（r27 起壞資料不再讓格式化出錯，改從送出這一步弄壞）
+_send = main.telegram.send
+def bad_send(m):
+    if m.startswith("🏁 AUSDT"): raise RuntimeError("通知送出失敗（模擬）")
+    return _send(m)
+main.telegram.send = bad_send
 main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
+main.telegram.send = _send
+check("M5", "（前提）A 的平倉通知真的失敗了（被隔離、有記錄）", any("AUSDT" in x and "通知送出失敗" in x for x in store.get().get("errors", [])),
+      f"{store.get().get('errors', [])[-2:]}")
 check("M5", "（前提）對帳真的走到 A 的結帳（出錯的那一步之前的動作都發生了）", "AUSDT" in CALLED)
-check("M5", "A 的平倉通知格式化出錯 → 對帳不中斷", e is None, f"err={e}")
+check("M5", "A 的平倉通知出錯 → 對帳不中斷", e is None, f"err={e}")
 check("M5", "A 出錯 → 排在後面的 X 照樣對帳（仍在帳上、交易所列表有更新）",
       "XUSDT" in store.get().get("open", {}) and any(x["symbol"] == "XUSDT" for x in store.get().get("exchange", [])))
 check("M5", "A 出錯要推播（不能只進錯誤區）", any("AUSDT" in m and ("出錯" in m) for m in TG), f"{TG}")
@@ -117,12 +90,5 @@ check("M6", "壞掉那筆的錯誤要推播，而且那筆不能被靜靜丟掉"
       f"TG={TG[-2:]} leftover={list(store.get().get('leftover', {}))}")
 
 # =====================================================================
-print("用法第 5 點：通知在 try 裡的錯誤不能被吞")
-fresh()                                                  # 全域檢查自成一個情境：不繼承上一個情境的突變命中次數（fresh 會先收集錯誤區與推播）
-bugs = [x for x in ALL_ERR if any(k in x for k in ("NameError", "AttributeError", "TypeError", "KeyError", "is not defined"))
-        and "AUSDT" not in x and "bad" not in x]
-check("H10", "（前提）有收集到各情境的錯誤區與推播", len(ALL_ERR) > 0)
-check("H10", "所有情境裡沒有非注入的程式錯誤", not bugs, f"{bugs[:3]}")
 
-print("\n全部通過" if not fails else f"\n{len(fails)} 項失敗：{sorted(set(fails))}")
-sys.exit(1 if fails else 0)
+finish(allowed=('AUSDT', 'bad'))   # 本檔刻意注入的錯誤字串；其餘程式錯誤一律算失敗

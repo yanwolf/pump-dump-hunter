@@ -14,6 +14,10 @@ TF_MS = {"1m": 60_000, "5m": 300_000}
 def tf_of(eid): return ENGINE_TF.get(eid, "5m")
 def rules(eid): return {**C.RISK, **C.EXIT.get(eid, {})}
 def _now(): return int(time.time() * 1000)
+def num(v):
+    """是數字才回傳，否則 None。`.get(鍵, 預設)` 擋不住「鍵存在、值是 None」（清單第 8 條 r27），計算前一律先過這一關。"""
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
 def _log(msg): store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
 
 def nag(n):
@@ -135,10 +139,12 @@ def close_now(sym, pos, by):
 
     was = pos.pop("close_fail", 0); pos.pop("want_close", None)
     # 交易所上已經平掉了——從這裡開始不能丟例外（清單第 8 條 r24）：算損益只用 .get()，缺欄位記為未知
-    entry, q = pos.get("fill") or pos.get("entry"), pos.get("qty")
+    entry, q = num(pos.get("fill")), num(pos.get("qty"))   # 估算只用實際成交價；查不到就記未知，交給成交明細（r27）
+    parts = [num((x or {}).get("pnl")) for x in pos.get("partials", [])]
     try:
-        pnl = round((px - entry) * q * (1 if side == "LONG" else -1)
-                    + sum((x or {}).get("pnl", 0) or 0 for x in pos.get("partials", [])), 2) if px and entry and q else None
+        # 任何一段損益未知 → 整筆未知（不能把未知那段當 0 加總，清單第 8 條 r27）
+        pnl = round((px - entry) * q * (1 if side == "LONG" else -1) + sum(parts), 2) \
+              if px and entry and q and all(p is not None for p in parts) else None
     except Exception: pnl = None
     info = dict(exit=px, pnl=pnl)
     try: info.update({k: v for k, v in close_info(sym, pos).items() if v is not None})   # 成交明細優先，分段加總
@@ -146,7 +152,8 @@ def close_now(sym, pos, by):
     rec = record_close(sym, pos, by, info)                 # 寫紀錄、移出帳都在裡面
     try:
         telegram.send(f"🏁 {sym} 引擎{pos.get('engine')} {by}出場" +
-                      (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
+                      (f" @ {rec['exit']:.6g}" if num(rec.get("exit")) else "") +
+                      (f"，損益 {rec['pnl']:+.2f} U" if num(rec.get("pnl")) is not None else "，損益未知（成交明細查不到、估算缺資料）") +
                       (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else "") +
                       (f"（先前平倉失敗 {was} 次，已恢復）" if was >= 1 else ""))
     except Exception as e: _once_err(sym, "出場通知", e)
@@ -154,7 +161,7 @@ def close_now(sym, pos, by):
 
 def retry_close(sym, pos):
     """上次平倉沒完成 → 每輪重試，直到交易所上確實沒有這個部位。"""
-    if not pos.get("want_close"): return None
+    if not pos.get("want_close"): return "nothing"          # 沒有待平倉（回傳原因，清單第 2 條 r27）
     try: close_now(sym, pos, pos["want_close"]); return "closed"
     except CloseFailed: return "pending"
 
@@ -200,19 +207,21 @@ def move_stop(sym, pos, new_stop, qty=None):
     pos.update(stop=new_stop, stop_id=o.get("orderId"), stop_via=o.get("via"), want_stop=None, want_fail=0)
     if was >= 1:
         telegram.send(f"✅ {sym} 停損已移到 {new_stop:.6g}（先前失敗 {was} 次，已恢復）")
+    return "moved"
 
 def retry_stop(sym, pos):
     """上次移損沒成功 → 每輪重試。計數、告警、恢復通知都在 move_stop 裡。
     crypto-screener 曾因移損失敗只試一次而『移損到成本』安靜失效好幾天。"""
     want = pos.get("want_stop")
-    if want is None or want == pos.get("stop"): pos["want_stop"] = None; return
-    try: move_stop(sym, pos, want)
-    except StopMoveFailed: pass
+    if want is None or want == pos.get("stop"): pos["want_stop"] = None; return "nothing"
+    try: return move_stop(sym, pos, want)             # moved／unknown／gone
+    except StopMoveFailed: return "failed"
     except Exception as e:
         if "-2021" in str(e):                       # 價格已穿過想要的停損 = 本來就該出場
             try: close_now(sym, pos, "停損"); return "closed"
-            except CloseFailed: return None
+            except CloseFailed: return "close_pending"
         _log(f"{sym} 重試移損 {e}")
+        return "error"
 
 _missing = {}          # symbol → 連續幾輪確認停損不在
 
@@ -279,12 +288,15 @@ def step(sym, pos):
     """處理這筆持倉自上次以來新收盤的 K 棒。回傳 "closed" 或 None（pos 會就地更新）。"""
     eid = pos.get("engine"); R = rules(eid); tf = tf_of(eid); ms = TF_MS[tf]
     d = 1 if pos["side"] == "LONG" else -1
-    start = pos.get("bar_t") or (pos.get("ts", _now()) // ms) * ms       # 訊號棒 = 回測的 t["i"]
+    # 訊號棒 = 回測的 t["i"]。值是 None 才用預設——0 是合法的值，不能用 `or`（清單第 8 條 r27）
+    start = num(pos.get("bar_t"))
+    if start is None: start = ((num(pos.get("ts")) if num(pos.get("ts")) is not None else _now()) // ms) * ms
     r_unit = pos.get("r_unit") or abs(pos["entry"] - pos["stop"])
     if not r_unit: return None
     k = closed_bars(sym, tf, min(R["max_hold_bars"] + R["trail_bars"] + 10, 1400))
     for j, bar in enumerate(k):
-        if bar["t"] <= pos.get("last_t", start): continue
+        last = num(pos.get("last_t"))
+        if bar["t"] <= (start if last is None else last): continue
         pos["last_t"] = bar["t"]
         n = (bar["t"] - start) // ms                                     # = 回測的 i - t["i"]
         fav = bar["h"] if d > 0 else bar["l"]
