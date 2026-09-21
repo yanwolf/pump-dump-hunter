@@ -16,6 +16,12 @@ def so(sym, side, qty, px):
 fake.stop_order=so
 fake.cancel_order=lambda s,i: S["stops"].pop(i,None)
 fake.user_trades=lambda s: []
+# 平倉後會再查一次交易所部位確認（清單第 8 條 r12），模擬交易所要能回報剩餘數量
+fake.open_positions=lambda: ([dict(symbol="X", positionSide="BOTH", entryPrice="1",
+                                   positionAmt=str(S["pos_qty"] if S.get("side","LONG")=="LONG" else -S["pos_qty"]))]
+                             if S["pos_qty"] > 1e-9 else [])
+fake.side_of=lambda p: "LONG" if float(p["positionAmt"]) > 0 else "SHORT"
+fake.cancel_order=lambda s,i,v=None: S["stops"].pop(i,None)
 from app import store, manager, backtest, signals
 manager._now = lambda: S["now"]
 from app.signals import Signal
@@ -27,7 +33,7 @@ def run_case(name, eid, side, bars, sig_i, entry, stop):
     backtest.ENGINES[eid]=eng
     bt = backtest.simulate(bars, (eid,))[0]
     # --- 實盤管理：逐根推進時間，每根收盤後跑一次 ---
-    S.update(bars=bars, orders=[], stops={}, pos_qty=100)
+    S.update(bars=bars, orders=[], stops={}, pos_qty=100, side=side)
     pos=dict(engine=eid, side=side, entry=entry, stop=stop, qty=100, bar_t=bars[sig_i]["t"], last_t=bars[sig_i]["t"],
              r_unit=abs(entry-stop), ts=bars[sig_i]["t"], stop_id=None)
     live=None

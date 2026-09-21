@@ -1,0 +1,163 @@
+"""測試用的模擬幣安（在 HTTP 層攔截 urlopen，讓 app/binance.py 的程式碼真的跑過）。
+
+清單用法第 5 點（r12）要求的行為：
+- 條件單送到舊端點 /fapi/v1/order → -4120
+- 單向模式：每個幣只有一列 BOTH，空單 positionAmt 是負數
+- 雙向模式：LONG / SHORT 兩列，SHORT 的 positionAmt 是負數；平倉超量被拒
+- 送錯模式參數 → -4061（帶/沒帶 positionSide 不符）或 -1106（雙向帶 reduceOnly）
+另外可以注入：逾時、5xx、指定錯誤碼、「成交了但回應丟失」。
+"""
+import json, socket, time, urllib.error, urllib.parse, urllib.request
+
+
+class _Resp:
+    def __init__(self, d): self.d = d
+    def read(self): return json.dumps(self.d).encode()
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
+
+class _HTTPErr(urllib.error.HTTPError):
+    def __init__(self, url, code, body):
+        super().__init__(url, code, "err", {}, None); self._b = body
+    def read(self): return self._b.encode()
+
+
+class FakeBinance:
+    def __init__(self, hedge=False, algo="ok", price=1.0):
+        self.hedge = hedge
+        self.algo = algo                 # "ok" / "404"
+        self.price = price
+        self.pos = {}                    # (symbol, "LONG"/"SHORT") -> [qty>0, entry]
+        self.algo_orders = {}            # algoId -> dict
+        self.next_id = 1000
+        self.inject = []                 # [dict(path=, method=None, match=None, times=1, kind=, code=, body=, then_execute=False)]
+        self.calls = []                  # (method, path, params)
+        self.trades = []
+
+    # ---------- 狀態輔助 ----------
+    def open(self, symbol, side, qty, entry=None):
+        self.pos[(symbol, side)] = [float(qty), entry or self.price]
+
+    def qty(self, symbol, side):
+        return self.pos.get((symbol, side), [0, 0])[0]
+
+    def rows(self):
+        out = []
+        syms = sorted({s for s, _ in self.pos})
+        for s in syms:
+            L, S = self.qty(s, "LONG"), self.qty(s, "SHORT")
+            if self.hedge:
+                for side, q in (("LONG", L), ("SHORT", S)):
+                    if q: out.append(dict(symbol=s, positionSide=side, positionAmt=str(q if side == "LONG" else -q),
+                                          entryPrice=str(self.pos[(s, side)][1]), unRealizedProfit="0"))
+            else:
+                net = L - S
+                if net:
+                    side = "LONG" if net > 0 else "SHORT"
+                    out.append(dict(symbol=s, positionSide="BOTH", positionAmt=str(net),
+                                    entryPrice=str(self.pos[(s, side)][1]), unRealizedProfit="0"))
+        return out
+
+    # ---------- 安裝 ----------
+    def install(self):
+        urllib.request.urlopen = self._urlopen
+        return self
+
+    def _err(self, url, code, body): raise _HTTPErr(url, code, body)
+
+    def _urlopen(self, req, timeout=None):
+        url = req.full_url
+        path = url.split("?")[0].split(".com", 1)[-1]
+        method = req.get_method()
+        raw = (req.data or b"").decode() or (url.split("?", 1)[1] if "?" in url else "")
+        params = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+        self.calls.append((method, path, params))
+
+        for rule in list(self.inject):
+            if rule["path"] != path: continue
+            if rule.get("method") and rule["method"] != method: continue
+            if rule.get("match") and not rule["match"](params): continue
+            rule["times"] -= 1
+            if rule["times"] <= 0: self.inject.remove(rule)
+            if rule.get("then_execute"):                       # 交易所端執行了，但回應在路上丟了
+                self._route(url, path, method, params)
+            if rule["kind"] == "timeout": raise socket.timeout("timed out")
+            self._err(url, rule["code"], rule.get("body", ""))
+
+        return _Resp(self._route(url, path, method, params))
+
+    # ---------- 路由 ----------
+    def _route(self, url, path, method, p):
+        if path == "/fapi/v1/positionSide/dual": return {"dualSidePosition": self.hedge}
+        if path == "/fapi/v2/positionRisk": return self.rows()
+        if path == "/fapi/v1/exchangeInfo":
+            return {"symbols": [dict(symbol=s, filters=[
+                dict(filterType="LOT_SIZE", stepSize="1", minQty="1"),
+                dict(filterType="PRICE_FILTER", tickSize="0.0001"),
+                dict(filterType="MIN_NOTIONAL", notional="5")]) for s in ("XUSDT", "YUSDT")]}
+        if path == "/fapi/v1/leverage": return {"leverage": int(p.get("leverage", 1))}
+        if path == "/fapi/v1/userTrades": return [t for t in self.trades if t["symbol"] == p.get("symbol")]
+        if path == "/fapi/v1/openAlgoOrders":
+            return [o for o in self.algo_orders.values() if o["symbol"] == p.get("symbol", o["symbol"])]
+        if path == "/fapi/v1/openOrders": return []
+        if path == "/fapi/v1/algoOrder":
+            if self.algo == "404": self._err(url, 404, "Not Found")
+            if method == "DELETE":
+                aid = int(p["algoId"])
+                if aid not in self.algo_orders: self._err(url, 400, '{"code":-2011,"msg":"Unknown order sent."}')
+                return self.algo_orders.pop(aid)
+            self._check_mode(url, p, reduce=True)
+            self.next_id += 1
+            o = dict(algoId=self.next_id, symbol=p["symbol"], side=p["side"], orderType=p["type"],
+                     triggerPrice=p.get("triggerPrice"), quantity=p.get("quantity"), positionSide=p.get("positionSide", "BOTH"))
+            self.algo_orders[self.next_id] = o
+            return dict(o)
+        if path == "/fapi/v1/order":
+            if method == "DELETE": self._err(url, 400, '{"code":-2011,"msg":"Unknown order sent."}')
+            if p.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT", "TRAILING_STOP_MARKET"):
+                self._err(url, 400, '{"code":-4120,"msg":"Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."}')
+            return self._market(url, p)
+        return {}
+
+    def _check_mode(self, url, p, reduce):
+        has_ps = "positionSide" in p
+        if self.hedge and not has_ps: self._err(url, 400, '{"code":-4061,"msg":"Order\'s position side does not match user\'s setting."}')
+        if not self.hedge and has_ps: self._err(url, 400, '{"code":-4061,"msg":"Order\'s position side does not match user\'s setting."}')
+        if self.hedge and p.get("reduceOnly"): self._err(url, 400, '{"code":-1106,"msg":"Parameter \'reduceonly\' sent when not required."}')
+
+    def _market(self, url, p):
+        self._check_mode(url, p, reduce=False)
+        s, side, q = p["symbol"], p["side"], float(p["quantity"])
+        px = self.price
+        if self.hedge:
+            ps = p["positionSide"]
+            closing = (ps == "LONG" and side == "SELL") or (ps == "SHORT" and side == "BUY")
+            if closing:
+                have = self.qty(s, ps)
+                if q > have + 1e-9: self._err(url, 400, '{"code":-2022,"msg":"ReduceOnly Order is rejected."}')
+                self._reduce(s, ps, q, px); return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
+            self._add(s, ps, q, px); return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
+        # 單向
+        L, S = self.qty(s, "LONG"), self.qty(s, "SHORT")
+        net = L - S
+        if p.get("reduceOnly"):
+            if (side == "SELL" and net <= 0) or (side == "BUY" and net >= 0):
+                self._err(url, 400, '{"code":-2022,"msg":"ReduceOnly Order is rejected."}')
+            q = min(q, abs(net))                              # 單向 reduceOnly 會被截到部位大小
+            self._reduce(s, "LONG" if net > 0 else "SHORT", q, px)
+            return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
+        self._add(s, "LONG" if side == "BUY" else "SHORT", q, px)
+        return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
+
+    def _add(self, s, side, q, px):
+        cur = self.pos.get((s, side), [0, px])
+        self.pos[(s, side)] = [cur[0] + q, px if not cur[0] else cur[1]]
+
+    def _reduce(self, s, side, q, px):
+        cur = self.pos[(s, side)]
+        pnl = (px - cur[1]) * q * (1 if side == "LONG" else -1)
+        self.trades.append(dict(symbol=s, side="SELL" if side == "LONG" else "BUY", time=int(time.time() * 1000),
+                                qty=str(q), price=str(px), realizedPnl=str(pnl), commission="0"))
+        cur[0] -= q
+        if cur[0] <= 1e-9: del self.pos[(s, side)]

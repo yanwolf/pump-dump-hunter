@@ -33,12 +33,17 @@ def exchange(account_hedge, detect_ok, sent, on_reject=None):
         if path == "/fapi/v1/positionSide/dual":
             if not detect_ok: raise _E(req.full_url, 429, "rate limited")
             return _R({"dualSidePosition": account_hedge})
-        body = (req.data or b"").decode(); sent.append(body)
+        body = (req.data or b"").decode(); sent.append(body); PATHS.append(path)
+        # 跟真實幣安一致（清單用法第 5 點 r12）：條件單送到舊端點一律 -4120
+        if path == "/fapi/v1/order" and "type=STOP" in body:
+            raise _E(req.full_url, 400, '{"code":-4120,"msg":"Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."}')
         if ("positionSide" in body) != account_hedge:
             if on_reject: on_reject()
             raise _E(req.full_url, 400, '{"code":-4061,"msg":"position side does not match"}')
         return _R({"avgPrice": "1", "algoId": 1})
     urllib.request.urlopen = fake
+
+PATHS = []   # 每張單實際打到的端點，用來確認測試有走到該走的分支
 
 def try_order(fn):
     try: fn(); return True
@@ -60,11 +65,12 @@ r = try_order(lambda: B.market_order("XUSDT", "SELL", 100, reduce_only=True))
 check("C3", "快取為空、偵測失敗 → 單仍送出並成功", r is True, f"結果={r} 送了{len(sent)}次")
 
 # C6：快取過期、第一次送單時偵測失敗 → 不能放棄，要用舊值送（錯了再靠 -4061 反轉）
-sent = []
+sent = []; PATHS.clear()
 B._mode.update(hedge=True, t=0)                                 # 過期但有舊值
 exchange(account_hedge=True, detect_ok=False, sent=sent)
 r = try_order(lambda: B.stop_order("XUSDT", "SELL", 100, 0.9))
 check("C6", "快取過期 + 偵測失敗 → 掛停損不放棄（用舊值送出）", r is True and len(sent) == 1, f"結果={r} 送了{len(sent)}次")
+check("H1", "C6 那張停損確實走 Algo 端點（不是靠舊端點回 200 過關）", PATHS[-1:] == ["/fapi/v1/algoOrder"], f"端點={PATHS[-1:]}")
 
 # C2：重送成功後，快取 = 實際成功的那個假設；重送也失敗時，快取不能留著沒驗證過的值
 sent = []

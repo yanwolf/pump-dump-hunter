@@ -16,6 +16,8 @@ app/                 程式全部在這裡，Dockerfile 只 COPY app
   signals.py scanner.py risk.py backtest.py sweep.py params.py presets.py config.py store.py telegram.py
 tests/test_parity.py 回測 vs 實盤出場一致性測試（python -m tests.test_parity）
 tests/test_lessons.py 清單 r6→r8 差異的行為測試（python -m tests.test_lessons）
+tests/test_r12.py     清單 r10→r12 差異的行為測試（python -m tests.test_r12）
+tests/fake_exchange.py 模擬幣安（HTTP 層）：舊端點條件單 -4120、空單負數、雙向兩列、可注入逾時／5xx／成交但回應丟失
 部署前兩支測試都要過，且 python -m pyflakes app/ 沒有 undefined name
 BINANCE_LESSONS.md   三專案共用的踩坑清單
 ```

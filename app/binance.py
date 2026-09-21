@@ -1,5 +1,5 @@
 """純標準庫的 Binance Futures 客戶端。公開資料不需 key；下單需要。"""
-import decimal, hashlib, hmac, json, time, urllib.error, urllib.parse, urllib.request
+import decimal, hashlib, hmac, json, re, time, urllib.error, urllib.parse, urllib.request
 from . import config as C
 
 def _open(req):
@@ -22,6 +22,12 @@ def _get(path, params=None, base=None, signed=False):
         headers["X-MBX-APIKEY"] = C.API_KEY
     url = f"{base}{path}?{urllib.parse.urlencode(params)}"
     return _open(urllib.request.Request(url, headers=headers))
+
+def definite_reject(e):
+    """交易所明確拒絕（4xx 且帶錯誤碼）= 這張單一定沒成交。
+    逾時、連線中斷、5xx、沒有錯誤碼的回應 = 結果不明，單可能已經成交（清單第 3 條 r12）。"""
+    m = re.match(r"HTTP (\d+) (.*)", str(e), re.S)
+    return bool(m) and 400 <= int(m.group(1)) < 500 and '"code"' in m.group(2)
 
 def _mode_err(e):
     return "-4061" in str(e) or "-1106" in str(e)
@@ -191,34 +197,48 @@ def side_of(p):
     ps = p.get("positionSide", "BOTH")
     return ps if ps in ("LONG", "SHORT") else ("LONG" if float(p["positionAmt"]) > 0 else "SHORT")
 
-_algo_ok = [None]          # None=還不確定 True/False=已測知
+_algo = dict(legacy_until=0.0)
+LEGACY_RETRY_SEC = 600
+
+def algo_active():
+    """目前條件單走 Algo 端點嗎。退回舊端點只是暫時的（清單第 1 條 r12）。"""
+    return time.time() >= _algo["legacy_until"]
+
+def _is_404(e): return str(e).startswith("HTTP 404")
 
 def stop_order(symbol, side, qty, stop_price):
     """停損單。幣安 2025-12-09 起把條件單搬到 Algo 服務（舊端點回 -4120），
     參數也改名：stopPrice → triggerPrice，並要帶 algoType=CONDITIONAL。
-    先打新端點，只有「端點不存在」才退回舊寫法，讓不同版本的正式網與模擬網都能運作。
+    退回舊端點的規則（清單第 1 條 r12）：
+    - 只有 HTTP 404 才當成「Algo 端點不存在」；-1000（暫時性）、-1013（參數錯）等都照樣往上拋。
+    - 退回只維持 LEGACY_RETRY_SEC 秒，之後重新試 Algo；一次誤判不能讓之後所有條件單永久走舊端點。
+    - 舊端點回 -4120 = 交易所明確說要用 Algo → 立刻改回 Algo 重送這一張。
     回傳的 dict 會有 orderId（相容舊欄位）與 via（algo / legacy），撤單要靠 via 決定端點。"""
     base = dict(symbol=symbol, side=side, type="STOP_MARKET",
                 quantity=round_qty(symbol, qty), workingType="MARK_PRICE")
     px = round_price(symbol, stop_price)
 
-    if _algo_ok[0] is not False:
-        try:
-            o = _send_mode_safe("/fapi/v1/algoOrder", dict(base, algoType="CONDITIONAL", triggerPrice=px), side, True)
-            _algo_ok[0] = True
-            o["orderId"] = o.get("algoId"); o["via"] = "algo"
-            return o
+    def via_algo():
+        o = _send_mode_safe("/fapi/v1/algoOrder", dict(base, algoType="CONDITIONAL", triggerPrice=px), side, True)
+        o["orderId"] = o.get("algoId"); o["via"] = "algo"; return o
+
+    def via_legacy():
+        o = _send_mode_safe("/fapi/v1/order", dict(base, stopPrice=px), side, True)
+        o["via"] = "legacy"; return o
+
+    if algo_active():
+        try: return via_algo()
         except Exception as e:
-            msg = str(e)
-            # 參數錯不代表端點不存在；只有 404 / 未知端點才退回舊寫法
-            if not ("404" in msg or "-1013" in msg or "Unknown" in msg): raise
-            _algo_ok[0] = False
-    o = _send_mode_safe("/fapi/v1/order", dict(base, stopPrice=px), side, True)
-    o["via"] = "legacy"
-    return o
+            if not _is_404(e): raise
+            _algo["legacy_until"] = time.time() + LEGACY_RETRY_SEC
+    try: return via_legacy()
+    except Exception as e:
+        if "-4120" not in str(e): raise
+        _algo["legacy_until"] = 0.0
+        return via_algo()
 
 def gone(e):
-    """撤單回『查無此單』= 已觸發或已撤，不是錯誤。"""
+    """撤單回『查無此單』= 已觸發或已撤，不是錯誤（清單第 13 條）。"""
     s = str(e); return "-2011" in s or "Unknown order" in s or "-2013" in s
 
 def cancel_order(symbol, order_id, via=None):
@@ -234,12 +254,13 @@ def cancel_order(symbol, order_id, via=None):
     raise RuntimeError("; ".join(errs))
 
 def all_open_stops():
-    """全帳號的條件單（不帶 symbol，權重 40）。只給自檢用，不要放進迴圈。"""
+    """全帳號的條件單（不帶 symbol，權重 40）。只給自檢用，不要放進迴圈。兩個端點都查。"""
     rows = []
     for path, params in (("/fapi/v1/openAlgoOrders", dict(algoType="CONDITIONAL")), ("/fapi/v1/openOrders", {})):
-        if path.startswith("/fapi/v1/openAlgo") and _algo_ok[0] is False: continue
-        if path == "/fapi/v1/openOrders" and _algo_ok[0] is True: continue
-        d = _get(path, params, signed=True)
+        try: d = _get(path, params, signed=True)
+        except Exception:
+            if path.startswith("/fapi/v1/openAlgo") and not algo_active(): continue
+            raise
         rows += d if isinstance(d, list) else (d.get("orders") or [])
     return [o for o in rows if order_type(o) in ("STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT", "TRAILING_STOP_MARKET")]
 
@@ -248,20 +269,18 @@ def order_type(o):
     return str(o.get("orderType") or o.get("type") or o.get("origType") or "").upper()
 
 def open_stops(symbol):
-    """這個幣掛著的條件單，回傳 (orders, ok)。
+    """這個幣掛著的停損單，回傳 (orders, ok)。兩個端點都查（退回舊端點期間兩邊都可能有單）。
     ok=False 代表查詢本身失敗——呼叫端絕對不能把「查不到」當成「不存在」，
-    這是 crypto-screener 誤平倉事件的根源。"""
-    paths = []
-    if _algo_ok[0] is not False: paths.append(("/fapi/v1/openAlgoOrders", dict(symbol=symbol, algoType="CONDITIONAL")))
-    if _algo_ok[0] is not True: paths.append(("/fapi/v1/openOrders", dict(symbol=symbol)))
-    out, ok = [], False
-    for path, params in paths:
+    這是 crypto-screener 誤平倉事件的根源。Algo 查詢失敗只有在「目前暫時走舊端點」時才可以忽略。"""
+    out, ok_algo, ok_legacy = [], False, False
+    for path, params in (("/fapi/v1/openAlgoOrders", dict(symbol=symbol, algoType="CONDITIONAL")),
+                         ("/fapi/v1/openOrders", dict(symbol=symbol))):
         try: d = _get(path, params, signed=True)
         except Exception: continue
         rows = d if isinstance(d, list) else (d.get("orders") if isinstance(d, dict) else None)
         if rows is None: continue
-        ok = True
-        # 移動停利不算「停損還在」：要到啟動價才生效、通常只涵蓋部分數量，
-        # 算進去會把真正停損不見的情況蓋過去（清單第 7 條，r5）
+        if path.startswith("/fapi/v1/openAlgo"): ok_algo = True
+        else: ok_legacy = True
+        # 移動停利不算「停損還在」：要到啟動價才生效、通常只涵蓋部分數量（清單第 7 條，r5）
         out += [o for o in rows if order_type(o) in ("STOP_MARKET", "STOP")]
-    return out, ok
+    return out, ok_legacy and (ok_algo or not algo_active())

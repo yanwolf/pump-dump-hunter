@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-09-21r10"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
+VERSION = "2026-09-21r13"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):
@@ -40,7 +40,7 @@ def check(trade=False):
     try:
         stops, ok = B.open_stops("BTCUSDT")
         add("條件單端點", "ok" if ok else "fail",
-            f"{'algo' if B._algo_ok[0] is not False else 'legacy'} 端點可查，目前掛單 {len(stops)} 張")
+            f"{'algo' if B.algo_active() else '暫時走 legacy'} 端點可查，目前掛單 {len(stops)} 張")
     except Exception as e: add("條件單端點", "fail", e)
 
     # 4. 帳戶餘額與槓桿上限（新子帳戶常被限 5x）
