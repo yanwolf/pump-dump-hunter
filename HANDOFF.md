@@ -22,6 +22,7 @@ tests/test_r18.py     清單 r16→r18 差異的行為測試（python -m tests.t
 tests/test_r21.py     清單 r19→r21 差異的行為測試（python -m tests.test_r21）
 tests/test_r24.py     清單 r22→r24 差異的行為測試（python -m tests.test_r24）
 tests/test_r27.py     清單 r25→r27 差異的行為測試（python -m tests.test_r27）
+tests/test_r30.py     清單 r28→r30 差異的行為測試（python -m tests.test_r30）
 tests/harness.py      共用案例框架（check／fresh／finish）；自我驗證 python -m tests.harness_selftest
 scripts/check_returns.py 回傳原因語法樹檢查（每個 return 帶值、不會掉出函式）；--self-test 自我驗證
 scripts/verify.py     部署前完整驗證：python -m scripts.verify（全部通過才部署）

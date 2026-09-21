@@ -81,7 +81,10 @@ def reconcile(force=False):
                               + (f"（這一側送單前已有 {base:g}，交易所均價 {avg:g} 是合併過的，{fill:g} 是反推的估計值，"
                                  f"不是這張單的實際成交價）" if merged else "")
                               + ("，停損已掛上" if ok else "，⚠️ 停損還沒掛上（守衛會重試）"), sym)
-            elif now_ms - rec.get("ts", 0) > PENDING_TTL * 1000:          # 上面已經逐幣確認過沒有
+            elif manager.num(rec.get("ts")) is None:                    # 時間戳不是數字：無法判斷何時送出，不能讓它每輪出錯卡著
+                pend.pop(sym)
+                _say(lambda: f"ℹ️ {sym} 引擎{rec.get('engine')} 的 pending 沒有有效的時間戳，交易所上也沒有這個部位，判定逾時未成交", sym)
+            elif now_ms - rec["ts"] > PENDING_TTL * 1000:               # 上面已經逐幣確認過沒有
                 pend.pop(sym)
                 telegram.send(f"ℹ️ {sym} 引擎{rec.get('engine')} 送單結果不明，{PENDING_TTL} 秒內交易所都沒有這個部位，判定未成交")
             manager._step_ok(sym, "對帳認領")
@@ -103,14 +106,14 @@ def reconcile(force=False):
             left = abs(float(row["positionAmt"])) - base if row else 0.0     # 自己的 = 這一側 − 基準（第 7 條 r15）
             if left > 1e-9:
                 if rec.get("qty") and left < rec["qty"] - 1e-9:          # 數量變少：記部分出場（清單第 8 條 r12，已扣基準）
-                    px = float(row.get("markPrice") or row.get("entryPrice") or 0) or None
                     cut = rec["qty"] - left
-                    ref = manager.num(rec.get("fill"))   # 只用實際成交價；訊號價不是成交價，拿它估出來的「損益」是假的已知（r27）
-                    est = round((px - ref) * cut * (1 if rec["side"] == "LONG" else -1), 2) if px and ref else None
-                    rec = dict(rec, qty=left, partials=(rec.get("partials") or []) + [dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=est)])   # 算不出就是 None，不是 0
+                    # 損益只用實際成交（成交明細、界線之後）；不用標記價、不退回進場價（清單第 8 條 r30）
+                    rec = dict(rec); part = manager.adopt_partial(sym, rec, cut); rec["qty"] = left
                     changed = True
-                    telegram.send(f"✂️ {sym} 引擎{rec.get('engine')} 交易所上的數量減少 {rec['qty'] + cut:g} → {left:g}"
-                                  f"（不是本程式送的單，可能是在 App 手動減碼），已記一筆部分出場並更新帳上數量")
+                    _say(lambda: f"✂️ {sym} 引擎{rec.get('engine')} 交易所上的數量減少 {left + cut:g} → {left:g}"
+                                 f"（不是本程式送的單，可能是在 App 手動減碼），已記一筆部分出場並更新帳上數量；"
+                                 + (f"這段成交 {part['px']:.6g}、損益 {part['pnl']:+.2f} U" if manager.num(part.get("pnl")) is not None
+                                    else "這段損益未知（成交明細查不到，或同側有別人的部位分不出來）"), sym)
                 still[sym] = rec
             else:
                 rec = manager.record_close(sym, rec, "停損單"); changed = True
@@ -444,6 +447,7 @@ class H(BaseHTTPRequestHandler):
         try: body, ct = self._route()
         except Exception as e:
             traceback.print_exc()
+            manager._step_err("*", "網頁請求", e)             # 只印 traceback 的話，錯誤區與推播都看不到（清單用法第 5 點 r29）
             body, ct = json.dumps(dict(error=f"{type(e).__name__}: {e}"), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct); self.end_headers(); self.wfile.write(body)
     def _route(self):
@@ -518,7 +522,8 @@ def run():
     try:
         _p = presets.boot()
         if _p.get("live"): print("套用實盤參數覆蓋:", _p.get("live_name") or "自訂", _p["live"])
-    except Exception as e: print("preset boot:", e)
+    except Exception as e:
+        print("preset boot:", e); store.push("errors", f"{time.strftime('%m-%d %H:%M')} 開機套用參數失敗 {e}")
     threading.Thread(target=loop, daemon=True).start()
     port = int(os.environ.get("PORT", "8080")); print("listening", port)
     ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()

@@ -22,13 +22,19 @@ CASES = {
         'telegram.send("x")\ncheck("A", "清掉了", not manager._missing and not manager._errs and not store.get()["open"])\nfinish()\n', 0, "全部通過"),
     "infra=True → 印〔命中0〕〔基礎設施〕": (
         'fx = fresh()\ntelegram.send("x")\ncheck("A", "基礎設施", True, infra=True)\nfinish()\n', 0, "〔命中0〕〔基礎設施〕"),
+    "錯誤攔截涵蓋多個模組（manager、main、presets），至少兩個（r29 的前提）": (
+        'fx = fresh()\ngot = selftest_modules()\nprint("攔到", sorted(got))\ntelegram.send("x")\n'
+        'check("A", "至少兩個模組", len(got) >= 2 and {"manager", "main", "presets"} <= got)\nfinish(allowed=("自檢錯誤",))\n', 0, "攔到 [\'main\', \'manager\', \'presets\']"),
+    "只寫到標準錯誤的 traceback 也會被全域檢查掃到": (
+        'import traceback\nfx = fresh()\ntelegram.send("x")\ntry: {}["k"]\nexcept KeyError: traceback.print_exc()\n'
+        'check("A", "正常", True)\nfinish()\n', 1, "沒有非注入的程式錯誤"),
     "一般項目印這個情境的命中次數": (
         'fx = fresh()\nfx.mut_hits = 3\ntelegram.send("x")\ncheck("A", "一般", True)\nfinish()\n', 0, "一般〔命中3〕"),
 }
 
 fails = 0
 for name, (body, want_code, want_text) in CASES.items():
-    code = "from tests.harness import *\n" + body
+    code = "from tests.harness import (B, TG, check, finish, fresh, main, manager, selftest_modules, store, telegram)\n" + body
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     ok = p.returncode == want_code and want_text in p.stdout
     print(f"  {'✅' if ok else '❌'} {name}" + ("" if ok else f"　結束碼={p.returncode} 輸出末段={p.stdout[-200:]!r} {p.stderr[-200:]!r}"))

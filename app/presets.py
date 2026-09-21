@@ -45,7 +45,12 @@ def apply_live():
     C.restore(copy.deepcopy(_DEFAULTS))
     if form:
         try: C.apply_overrides(params.to_overrides(form))
-        except Exception as e: print("apply_live fail:", e)
+        except Exception as e:
+            # 只 print 的話，錯誤區與推播都看不到（清單用法第 5 點 r29：錯誤掃描要攔到所有模組）
+            print("apply_live fail:", e)
+            from . import store, telegram
+            store.push("errors", f"套用實盤參數覆蓋失敗 {type(e).__name__}: {e}")
+            telegram.send(f"🐞 套用實盤參數覆蓋失敗：{type(e).__name__}: {e} — 目前用的是程式預設值")
     return form
 
 def boot():

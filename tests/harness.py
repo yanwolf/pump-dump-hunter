@@ -32,6 +32,31 @@ RESET_ATTRS = [(B, "klines"), (B, "_get"), (manager, "_now"), (manager, "retry_s
 ORIG = {(id(m), a): getattr(m, a) for m, a in RESET_ATTRS}
 
 fails, ALL_ERR = [], []
+
+class _Tee:
+    """攔 sys.stderr：程式各模組的 traceback、print 到標準錯誤的錯誤都寫在這裡（清單用法第 5 點 r29：錯誤掃描要攔到所有模組）。"""
+    def __init__(self, real): self.real, self.lines = real, []
+    def write(self, s):
+        self.real.write(s)
+        if s.strip(): self.lines.append(s.rstrip())
+    def flush(self): self.real.flush()
+STDERR = _Tee(sys.stderr); sys.stderr = STDERR
+
+def selftest_modules():
+    """前提（r29）：在框架底下讓不同模組各走一次真的出錯路徑，回傳攔到的模組。至少要攔到兩個。"""
+    got = set(); mark_e, mark_s = len(store.get().get("errors", [])), len(STDERR.lines)
+    manager._step_err("SELFTEST", "框架自檢", RuntimeError("manager 自檢錯誤"))
+    if any("manager 自檢錯誤" in x for x in store.get().get("errors", [])[mark_e:]): got.add("manager")
+    main._loop_step("框架自檢", lambda: (_ for _ in ()).throw(RuntimeError("main 自檢錯誤")))
+    if any("main 自檢錯誤" in x for x in STDERR.lines[mark_s:]) and any("main 自檢錯誤" in x for x in store.get().get("errors", [])): got.add("main")
+    from app import presets
+    orig = presets.C.apply_overrides
+    presets.C.apply_overrides = lambda ov: (_ for _ in ()).throw(RuntimeError("presets 自檢錯誤"))
+    presets.set_live({"SCAN.watch_chg24": 15}); presets.apply_live()
+    presets.C.apply_overrides = orig; presets.set_live({}); presets.apply_live()
+    if any("presets 自檢錯誤" in x for x in store.get().get("errors", [])): got.add("presets")
+    manager._errs.clear(); main._loop_errs.clear()
+    return got
 _counts = dict(checks=0, positive=0)
 
 def check(tag, name, cond, detail="", infra=False):
@@ -71,7 +96,12 @@ def finish(allowed=()):
     fresh()
     check("H10", "（前提）有收集到各情境的錯誤區與推播，而且這支測試跑過斷言", len(ALL_ERR) > 0 and _counts["checks"] >= 1,
           f"收集 {len(ALL_ERR)} 則、斷言 {_counts['checks']} 項")
-    bugs = [x for x in ALL_ERR if any(k in x for k in BUG_MARKS) and not any(a in x for a in allowed)]
+    got = selftest_modules()
+    check("H10", "（前提）錯誤攔截涵蓋至少兩個不同模組（r29）", len(got) >= 2, f"攔到 {sorted(got)}")
+    ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
+    allowed = tuple(allowed) + ("自檢錯誤",)              # 上面自檢故意製造的錯誤
+    scanned = ALL_ERR + STDERR.lines                     # 錯誤區、推播、標準錯誤（traceback）都掃
+    bugs = [x for x in scanned if any(k in x for k in BUG_MARKS) and not any(a in x for a in allowed)]
     check("H10", "所有情境的錯誤區與推播裡，沒有非注入的程式錯誤", not bugs, f"{bugs[:3]}")
     print("\n全部通過" if not fails else f"\n{len(fails)} 項失敗：{sorted(set(fails))}")
     sys.exit(1 if fails else 0)

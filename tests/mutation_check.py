@@ -12,7 +12,7 @@
 """
 import os, re, subprocess, sys
 
-TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27"]
+TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27", "tests.test_r30"]
 LINE = re.compile(r"^  (✅|❌) \[[^\]]+\] (.+?)(?:　.*?)?(?:〔命中(\d+)〕)?(?:〔基礎設施〕)?$", re.M)
 
 def parse(stdout):

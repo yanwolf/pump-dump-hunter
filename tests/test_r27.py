@@ -36,8 +36,10 @@ check("P1", "沒有待平倉 → 重試平倉回傳原因", isinstance(r, str) a
 print("第 8 條 r26、r27：缺欄位的資料，通知要組得出來、計算不能拋")
 fx = fresh(); fx.open("XUSDT", "LONG", 100)
 p = dict(own_pos(fx, fill=None)); p.pop("entry")                        # 成交價是 None、沒有進場價
+fx.inject.append(dict(path="/fapi/v1/userTrades", times=5, kind="empty"))   # 成交明細也查不到 → 只能靠估算，而估算缺資料
 mark = len(fx.calls)
 r, e = run(lambda: manager.close_now("XUSDT", p, "時間"))
+check("P2", "（前提）程式真的去查了成交明細、而且查不到", any(c[1] == "/fapi/v1/userTrades" for c in since(fx, mark)))
 check("P2", "（前提）平倉單真的送出、交易所上確實平掉", fx.qty("XUSDT", "LONG") == 0 and
       any(c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true" for c in since(fx, mark)))
 check("P2", "缺成交價與進場價 → 照樣結帳", e is None and len(store.get().get("closed") or []) == 1, f"err={e}")
@@ -76,6 +78,6 @@ r, e = run(lambda: manager.close_now("XUSDT", p, "時間"))
 rec = (store.get().get("closed") or [{}])[-1]
 check("P4", "（前提）剩下的部位平掉、結帳了", fx.qty("XUSDT", "LONG") == 0 and bool(rec), f"err={e}")
 check("P4", "有一段損益未知 → 整筆的損益也是未知（不能把未知那段當 0 加總）", rec.get("pnl") is None, f"pnl={rec.get('pnl')}")
-check("P4", "通知講明損益未知", any("損益未知" in m for m in TG), f"{TG[-1:]}")
+check("P4", "平倉通知（🏁）講明損益未知", any(m.startswith("🏁") and "損益未知" in m for m in TG), f"{TG[-1:]}")
 
 finish()

@@ -9,7 +9,9 @@
 """
 import ast, sys
 
-TARGETS = {"app/manager.py": ["ensure_stop", "move_stop", "retry_stop", "place_stop", "retry_close"]}
+TARGETS = {"app/manager.py": ["ensure_stop", "move_stop", "retry_stop", "place_stop", "retry_close"],
+           "app/main.py": ["_protect", "manage", "trade_action"]}          # r30：手動平倉、認領、網頁交易入口也要
+MIN_RETURNS = 2   # 前提（第 19 種）：每個函式至少解析到 2 個 return。只看總數會被別的函式撐過去（crypto-screener r30）
 
 def bare(ret):
     return ret.value is None or (isinstance(ret.value, ast.Constant) and ret.value.value is None)
@@ -33,6 +35,11 @@ def check_fn(fn):
     if not ends(fn.body): probs.append("最後會掉出函式（回 None）")
     return probs
 
+def count_returns(path, names):
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    return {n: (sum(isinstance(r, ast.Return) for r in ast.walk(fns[n])) if n in fns else 0) for n in names}
+
 def check_file(path, names):
     tree = ast.parse(open(path, encoding="utf-8").read())
     fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
@@ -48,6 +55,7 @@ SELF = {
     "最後一句是 if、會掉出去":            ("def f(x):\n    if x: return 'a'\n", 1),
     "try／except 兩邊都 return":          ("def f(x):\n    try:\n        return 'a'\n    except Exception:\n        return 'b'\n", 0),
     "except 沒 return、會掉出去":          ("def f(x):\n    try:\n        return 'a'\n    except Exception:\n        pass\n", 1),
+    "沒有 else 的 if 在最後、if 裡有 return": ("def f(x):\n    y = 1\n    if x:\n        return 'a'\n", 1),
 }
 
 def self_test():
@@ -61,8 +69,11 @@ def main():
     if "--self-test" in sys.argv: sys.exit(1 if self_test() else 0)
     total, scanned = 0, 0
     for path, names in TARGETS.items():
+        counts = count_returns(path, names)
         for name, probs in check_file(path, names).items():
             scanned += 1
+            if counts.get(name, 0) < MIN_RETURNS:
+                probs = probs + [f"只解析到 {counts.get(name, 0)} 個 return（前提：每個函式至少 {MIN_RETURNS} 個）"]
             print(f"  {'✅' if not probs else '❌'} {path}:{name}" + ("" if not probs else "　" + "；".join(probs)))
             total += len(probs)
     print(f"掃了 {scanned} 個函式（預期 {sum(len(v) for v in TARGETS.values())}）")

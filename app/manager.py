@@ -35,18 +35,49 @@ def cooling(sym, eid):
     t = store.get().get("cool", {}).get(f"{sym}:{eid}")
     return bool(t) and _now() - t < rules(eid)["cooldown_bars"] * TF_MS[tf_of(eid)]
 
-def close_info(sym, pos, since_ms=None):
-    """從成交明細抓整筆交易的平均出場價、已實現損益（扣手續費）、R。含減碼那一半。"""
+def trades_after(sym, pos):
+    """這個部位「已採用的最後一筆成交之後」的平倉方向成交（清單第 8 條 r30）。
+    - 界線用成交 id（pos["trade_mark"]），不用偵測當下的時間：前一段的成交時間戳可能跟偵測落在同一毫秒內，會被重複算進來。
+    - 平倉成交用方向判斷，不用 realizedPnl ≠ 0——打平出場的那筆 realizedPnl 就是 0。
+    - 有基準部位（同側有別人的倉）時，成交明細分不出哪幾筆是自己的 → 回 None（未知）。
+    - 查詢失敗 → 回 None（未知）；查到但沒有 → 回 []。"""
+    if (num(pos.get("base_qty")) or 0) > 1e-9: return None
+    try: rows = B.user_trades(sym)
+    except Exception as e: _log(f"{sym} 查成交明細失敗 {e}"); return None
+    side = "SELL" if pos.get("side") == "LONG" else "BUY"
+    since = num(pos.get("ts")) or 0
+    mark = num(pos.get("trade_mark")) or 0
+    return [t for t in rows if t.get("side") == side and (num(t.get("time")) or 0) >= since and (num(t.get("id")) or 0) > mark]
+
+def _segment(trades):
+    """一段成交 → (平均成交價, 損益＝已實現−手續費, 數量, 最後一筆 id)。"""
+    q = sum(float(t["qty"]) for t in trades)
+    px = sum(float(t["price"]) * float(t["qty"]) for t in trades) / q
+    pnl = sum(float(t.get("realizedPnl") or 0) for t in trades) - sum(float(t.get("commission") or 0) for t in trades)
+    return float(f"{px:.6g}"), round(pnl, 2), q, max(num(t.get("id")) or 0 for t in trades)
+
+def adopt_partial(sym, pos, cut, px_hint=None):
+    """記一筆部分出場（App 手動減碼、ADL、1R 減碼）。損益只用實際成交（成交明細）；查不到、分不出是誰的就記未知。
+    不用標記價、不用觸發價、不退回進場價（清單第 8 條 r30）。採用了的成交推進界線，最後出場時不會再算一次。"""
+    tr = trades_after(sym, pos)
+    part = dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=None, px=None)
+    if tr:
+        px, pnl, q, last = _segment(tr)
+        part.update(px=px, pnl=pnl); pos["trade_mark"] = last
+    pos["partials"] = (pos.get("partials") or []) + [part]
+    return part
+
+def close_info(sym, pos):
+    """最後一段出場：只看界線之後的成交（出場價不被前面的部分出場拉偏）。
+    整筆損益 = 各段部分出場 + 最後一段；任何一段未知 → 整筆未知（清單第 8 條 r27、r30）。"""
     try:
-        side = "SELL" if pos.get("side") == "LONG" else "BUY"
-        since = since_ms or pos.get("ts") or _now() - 3 * 86_400_000
-        tr = [t for t in B.user_trades(sym) if t["side"] == side and t["time"] >= since and float(t.get("realizedPnl") or 0) != 0]
+        tr = trades_after(sym, pos)
         if not tr: return {}
-        q = sum(float(t["qty"]) for t in tr)
-        px = sum(float(t["price"]) * float(t["qty"]) for t in tr) / q
-        pnl = sum(float(t["realizedPnl"]) for t in tr) - sum(float(t.get("commission") or 0) for t in tr)
-        out = dict(exit=float(f"{px:.6g}"), pnl=round(pnl, 2))
-        if pos.get("risk_usdt"): out["r"] = round(pnl / pos["risk_usdt"], 2)
+        px, pnl, q, last = _segment(tr)
+        parts = [num((x or {}).get("pnl")) for x in pos.get("partials") or []]
+        total = round(pnl + sum(parts), 2) if all(p is not None for p in parts) else None
+        out = dict(exit=px, pnl=total)
+        if total is not None and num(pos.get("risk_usdt")): out["r"] = round(total / pos["risk_usdt"], 2)
         return out
     except Exception as e:
         _log(f"{sym} 抓出場價失敗 {e}"); return {}
@@ -304,8 +335,11 @@ def step(sym, pos):
         try:
             if R["tp1_r"] is not None and not pos.get("tp1") and r_now >= R["tp1_r"]:
                 half = float(B.round_qty(sym, pos["qty"] / 2))
-                B.market_order(sym, "SELL" if d > 0 else "BUY", half, reduce_only=True)
-                pos["qty"] = round(pos["qty"] - half, 8); pos["tp1"] = True; pos["state"] = "已減碼"
+                o = B.market_order(sym, "SELL" if d > 0 else "BUY", half, reduce_only=True)
+                done = num(float(o.get("executedQty") or 0)) or half
+                pos["qty"] = round(pos["qty"] - done, 8); pos["tp1"] = True; pos["state"] = "已減碼"
+                try: adopt_partial(sym, pos, done)            # 1R 減碼也是一段出場：損益用實際成交（清單第 8 條 r30）
+                except Exception as e: _log(f"{sym} 記 1R 減碼損益失敗 {e}")
                 telegram.send(f"✂️ {sym} 引擎{eid} 到 {R['tp1_r']}R 減碼一半，停損移到成本 {pos['entry']:.6g}")   # 減碼已成交，先通知
                 move_stop(sym, pos, pos["entry"])
             elif R["tp1_r"] is None and not pos.get("be") and R.get("be_r") and r_now >= R["be_r"]:

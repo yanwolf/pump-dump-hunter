@@ -10,6 +10,9 @@
 - positionRisk 帶 symbol 時，一定回這個幣的列（單向 1 列 BOTH、雙向 LONG/SHORT 2 列），數量 0 也回（清單第 2 條 r17）
 - 列上有 markPrice 與 unRealizedProfit（照這一列的合併均價算，含同側別人的部位）
 - 突變：環境變數 PDH_MUTATE=no_base → 逐幣查詢一律回空清單（清單用法第 5 點 r18：驗證前提斷言有沒有空跑）
+- 成交價 ≠ 標記價（清單用法第 5 點 r30）：市價單成交價加滑價（買貴 slip、賣便宜 slip），部位均價＝成交價的加權平均，
+  標記價＝self.price。兩者一樣時，測試分不出程式用的是成交價還是標記價。
+- 成交明細（userTrades）開倉、平倉都有，每筆有遞增 id、時間、手續費——跟真的一樣
 另外可以注入：逾時、5xx、指定錯誤碼、「成交了但回應丟失」。
 """
 import json, os, socket, time, urllib.error, urllib.parse, urllib.request
@@ -33,6 +36,9 @@ class FakeBinance:
         self.hedge = hedge
         self.algo = algo                 # "ok" / "404"
         self.price = price
+        self.slip = 0.001                # 市價單滑價比例
+        self.fee = 0.0004                # 手續費率
+        self.tid = 0
         self.pos = {}                    # (symbol, "LONG"/"SHORT") -> [qty>0, entry]
         self.algo_orders = {}            # algoId -> dict
         self.legacy_orders = {}          # orderId -> dict（只有 algo="404" 的環境才收）
@@ -169,7 +175,7 @@ class FakeBinance:
     def _market(self, url, p):
         self._check_mode(url, p, reduce=False)
         s, side, q = p["symbol"], p["side"], float(p["quantity"])
-        px = self.price
+        px = round(self.price * (1 + self.slip if side == "BUY" else 1 - self.slip), 10)   # 成交價 ≠ 標記價
         if self.hedge:
             ps = p["positionSide"]
             closing = (ps == "LONG" and side == "SELL") or (ps == "SHORT" and side == "BUY")
@@ -190,14 +196,20 @@ class FakeBinance:
         self._add(s, "LONG" if side == "BUY" else "SHORT", q, px)
         return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
 
+    def _trade(self, s, side, q, px, pnl):
+        self.tid += 1
+        self.trades.append(dict(id=self.tid, symbol=s, side=side, time=int(time.time() * 1000), qty=str(q), price=str(px),
+                                realizedPnl=str(round(pnl, 10)), commission=str(round(px * q * self.fee, 10))))
+
     def _add(self, s, side, q, px):
         cur = self.pos.get((s, side), [0, px])
-        self.pos[(s, side)] = [cur[0] + q, px if not cur[0] else cur[1]]
+        avg = (cur[0] * cur[1] + q * px) / (cur[0] + q)                   # 加權平均（真實交易所的 entryPrice）
+        self.pos[(s, side)] = [cur[0] + q, avg]
+        self._trade(s, "BUY" if side == "LONG" else "SELL", q, px, 0.0)   # 開倉成交也在明細裡
 
     def _reduce(self, s, side, q, px):
         cur = self.pos[(s, side)]
         pnl = (px - cur[1]) * q * (1 if side == "LONG" else -1)
-        self.trades.append(dict(symbol=s, side="SELL" if side == "LONG" else "BUY", time=int(time.time() * 1000),
-                                qty=str(q), price=str(px), realizedPnl=str(pnl), commission="0"))
+        self._trade(s, "SELL" if side == "LONG" else "BUY", q, px, pnl)
         cur[0] -= q
         if cur[0] <= 1e-9: del self.pos[(s, side)]
