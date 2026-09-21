@@ -16,6 +16,10 @@ def rules(eid): return {**C.RISK, **C.EXIT.get(eid, {})}
 def _now(): return int(time.time() * 1000)
 def _log(msg): store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
 
+def nag(n):
+    """需要人處理的持續狀態，提醒節奏統一：第 1、5、30 次，之後每 120 次（清單第 8 條，r6）。"""
+    return n in (1, 5, 30) or (n > 0 and n % 120 == 0)
+
 def closed_bars(sym, tf, limit=150):
     """只留已收盤的 K 棒（Binance 最後一根是進行中的）。"""
     cut = _now()
@@ -48,8 +52,9 @@ def record_close(sym, pos, by, info=None):
         if not oid: continue
         try: B.cancel_order(sym, oid, via)          # 已觸發／已撤（-2011）在 cancel_order 裡視為正常
         except Exception as e:
-            _log(f"{sym} 平倉後撤殘留停損失敗 {e}")
-            telegram.send(f"⚠️ {sym} 已平倉，但停損單 {oid} 撤不掉（{e}）— 請到交易所手動撤，避免動到同幣的其他倉")
+            _log(f"{sym} 平倉後撤殘留停損失敗 {e}（之後每輪重撤）")
+            lo = dict(store.get().get("leftover", {})); lo[str(oid)] = dict(symbol=sym, via=via, n=0, err=str(e)[:120])
+            store.update(leftover=lo)
     info = close_info(sym, pos) if info is None else info
     rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **info)
     store.push("closed", rec)
@@ -95,7 +100,7 @@ def retry_stop(sym, pos):
         if "-2021" in str(e):                       # 價格已穿過想要的停損 = 本來就該出場
             close_now(sym, pos, "停損"); return "closed"
         n = pos["want_fail"] = pos.get("want_fail", 0) + 1
-        if n in (1, 5, 30) or n % 120 == 0:        # 別每分鐘洗版，但要一直提醒
+        if nag(n):                                  # 別每分鐘洗版，但要一直提醒直到恢復
             telegram.send(f"🚨 {sym} 停損應移到 {want:.6g} 仍未成功（第 {n} 次，{e}）— 目前停損還在 {pos.get('stop'):.6g}")
 
 _missing = {}          # symbol → 連續幾輪確認停損不在
@@ -132,13 +137,18 @@ def ensure_stop(sym, pos):
     try:
         o = B.stop_order(sym, "SELL" if pos["side"] == "LONG" else "BUY", pos["qty"], pos["stop"])
         pos["stop_id"] = o.get("orderId"); pos["stop_via"] = o.get("via"); _missing[sym] = 0
+        was = pos.pop("guard_fail", 0)
         _log(f"{sym} 停損單不見了，已補掛 {pos['stop']}")
-        telegram.send(f"🔧 {sym} 引擎{pos.get('engine')} 停損單不見了，已補掛 {pos['stop']:.6g}")
+        telegram.send(f"🔧 {sym} 引擎{pos.get('engine')} 停損單不見了，已補掛 {pos['stop']:.6g}" +
+                      (f"（先前失敗 {was} 次，已恢復）" if was else ""))
     except Exception as e:
         msg = str(e).lower()
         if "existing" in msg or "already" in msg:         # 原則 3
             _missing[sym] = 0; _log(f"{sym} 停損其實在（補掛回報已存在），誤判"); return
-        telegram.send(f"🚨 {sym} 引擎{pos.get('engine')} 沒有停損單且補掛失敗（{e}）— 請手動處理")   # 原則 4
+        k = pos["guard_fail"] = pos.get("guard_fail", 0) + 1
+        if nag(k):                                                          # 原則 4：只告警、不平倉
+            telegram.send(f"🚨 {sym} 引擎{pos.get('engine')} 沒有停損單、補掛失敗（第 {k} 次）"
+                          f"應掛 {pos['stop']:.6g}，錯誤：{e} — 請手動處理")
 
 def step(sym, pos):
     """處理這筆持倉自上次以來新收盤的 K 棒。回傳 "closed" 或 None（pos 會就地更新）。"""
@@ -181,8 +191,26 @@ def step(sym, pos):
             return None
     return None
 
+def sweep_leftovers():
+    """平倉後沒撤掉的條件單：每輪重撤，照節奏提醒直到清掉（清單第 13 條 + 第 8 條 r6 告警節奏）。"""
+    lo = dict(store.get().get("leftover", {}))
+    if not lo: return
+    for oid, x in list(lo.items()):
+        try:
+            B.cancel_order(x["symbol"], int(oid) if str(oid).isdigit() else oid, x.get("via"))
+            if x["n"]: telegram.send(f"✅ {x['symbol']} 殘留停損單 {oid} 已撤掉（先前失敗 {x['n']} 次）")
+            lo.pop(oid)
+        except Exception as e:
+            x["n"] += 1; x["err"] = str(e)[:120]
+            if nag(x["n"]):
+                telegram.send(f"⚠️ {x['symbol']} 已平倉但停損單 {oid} 撤不掉（第 {x['n']} 次，{x['err']}）"
+                              f"— 可能動到同幣其他倉，請到交易所手動撤")
+    store.update(leftover=lo)
+
 def run():
     """每輪迴圈呼叫一次（在 reconcile 之後，已被交易所停損掉的倉不會進來）。"""
+    try: sweep_leftovers()
+    except Exception as e: _log(f"重撤殘留單 {e}")
     for sym in list(store.get().get("open", {})):
         pos = dict(store.get().get("open", {}).get(sym) or {})
         if not pos: continue

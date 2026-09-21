@@ -159,7 +159,13 @@ def _send_mode_safe(path, p, side, reduce_only):
     try: return _post(path, _mode_fields(dict(p), side, reduce_only))
     except Exception as e:
         if not _mode_err(e): raise
+        was = _mode["hedge"]
         _mode.update(hedge=None, t=0)
+        try: position_mode_hedge()                     # 重新偵測
+        except Exception:
+            # 偵測本身也可能失敗（逾時、限流）。被 -4061/-1106 拒絕已證明快取是錯的，
+            # 留著舊值等於下一張單再錯一次 → 直接反轉（清單第 7 條，r5）
+            _mode.update(hedge=(not was) if was is not None else None, t=time.time())
         return _post(path, _mode_fields(dict(p), side, reduce_only))
 
 def market_order(symbol, side, qty, reduce_only=False):
@@ -241,5 +247,7 @@ def open_stops(symbol):
         rows = d if isinstance(d, list) else (d.get("orders") if isinstance(d, dict) else None)
         if rows is None: continue
         ok = True
-        out += [o for o in rows if order_type(o) in ("STOP_MARKET", "STOP", "TRAILING_STOP_MARKET")]
+        # 移動停利不算「停損還在」：要到啟動價才生效、通常只涵蓋部分數量，
+        # 算進去會把真正停損不見的情況蓋過去（清單第 7 條，r5）
+        out += [o for o in rows if order_type(o) in ("STOP_MARKET", "STOP")]
     return out, ok
