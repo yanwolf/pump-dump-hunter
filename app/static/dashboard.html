@@ -1,0 +1,210 @@
+<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>pump-dump-hunter</title><style>
+:root{--bg:#0f1114;--card:#171a1f;--line:#262b33;--txt:#e6e8eb;--dim:#8b939e;--gold:#e8b339;--up:#3ecf8e;--down:#f2616b}
+*{box-sizing:border-box}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:0 0 40px}
+.wrap{padding:12px;max-width:1100px;margin:0 auto}
+header{position:sticky;top:0;z-index:9;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 12px}
+h1{font-size:15px;margin:0 0 4px;color:var(--gold);letter-spacing:.5px}
+h2{font-size:13px;margin:0 0 8px;color:var(--gold);font-weight:600}
+.meta{color:var(--dim);font-size:12px}
+.stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:12px}
+.stat b{color:var(--txt);font-size:13px;margin-left:4px}
+.tabs{display:flex;gap:4px;margin-top:10px}
+.tab{flex:1;text-align:center;padding:7px 4px;border-radius:8px;background:var(--card);border:1px solid var(--line);color:var(--dim);font-size:13px;cursor:pointer}
+.tab.on{color:var(--bg);background:var(--gold);border-color:var(--gold);font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px}
+table{border-collapse:collapse;font-size:12px;white-space:nowrap;width:100%}
+th{color:var(--dim);font-weight:500;text-align:right;padding:5px 8px;border-bottom:1px solid var(--line)}
+td{text-align:right;padding:6px 8px;border-bottom:1px solid #1e2228}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--card);max-width:150px;overflow:hidden;text-overflow:ellipsis}
+#swout td:first-child,#swout th:first-child{max-width:110px}
+td.lbl{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+.pos{color:var(--up)}.neg{color:var(--down)}.hot{color:var(--gold);font-weight:600}
+.empty{color:var(--dim);font-size:12px;padding:6px 0}
+input,select,button,textarea{background:#1e2228;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-size:13px;font-family:inherit}
+button{cursor:pointer}button:active{opacity:.7}
+button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-weight:600}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.pgrp{border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
+.pgrp h3{font-size:12px;color:var(--gold);margin:0 0 8px}
+.p{margin-bottom:10px}.p label{display:block;font-size:13px;margin-bottom:3px}
+.p .d{color:var(--dim);font-size:11px;margin-top:2px}
+.p input{width:110px}
+</style>
+<header>
+<h1>PUMP-DUMP HUNTER</h1>
+<div id=hmeta class=meta>載入中…</div>
+<div id=hstats class=stats></div>
+<div class=tabs>
+  <div class="tab on" data-t=watch>監控</div><div class=tab data-t=trade>交易</div><div class=tab data-t=lab>研究</div>
+</div>
+</header>
+<div class=wrap>
+<div id=watch class=pane></div>
+<div id=trade class=pane style=display:none>
+  <div id=t_open></div>
+  <div class=card><h2>帳號全部持倉 · 對帳用</h2>
+    <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）。點表格中的一列會自動帶入下方欄位。
+      確定是本策略漏記的孤兒倉，可以認領回來（會補掛停損）或直接平掉。自動刷新不會清掉你填的內容。</div>
+    <div class=row>
+      <select id=mx style="flex:1;min-width:120px"><option value="">— 選幣 —</option></select>
+      <select id=me style="width:70px"><option>C</option><option>F</option><option selected>G</option></select>
+      <input id=ms placeholder=停損價 inputmode=decimal style="width:100px"></div>
+    <div class=row><button class=go onclick="mpos('adopt')">認領+補停損</button><button onclick="mpos('close')">平倉</button>
+      <span id=mout class=meta></span></div>
+    <div id=t_ex></div>
+  </div>
+  <div id=t_rest></div>
+</div>
+<div id=lab class=pane style=display:none>
+  <div class=card><h2>單幣回測（5m，最多 30 天）</h2>
+    <div class=row><input id=bs value="AIN" style="width:85px"><span class=meta>USDT</span>
+      <input id=bd type=number value=3 style="width:55px"><span class=meta>天</span>
+      <button class=go onclick="bt()">跑回測</button><button onclick="dg()">A 診斷</button></div>
+    <div id=btout class=meta>結果會留在這裡，不受自動刷新影響</div>
+  </div>
+  <div class=card><h2>歷史事件掃描（全市場，背景執行）</h2>
+    <div class=row><input id=sd type=number value=90 style="width:55px"><span class=meta>天</span>
+      <select id=sm style="flex:1;min-width:200px">
+        <option value=crash>崩盤日 · 單日跌30% · 測 C/F</option>
+        <option value=pumpday>暴漲日 · 單日漲30% · 測 E/G</option>
+        <option value=pump>拉高崩盤事件 · 3天漲倍後跌四成（對做多有事後偏差）</option>
+      </select></div>
+    <div class=row><input id=sl placeholder="標籤（可空）" style="flex:1;min-width:120px">
+      <button class=go onclick="sw()">開始掃描</button><button onclick="swload()">更新</button>
+      <button onclick="swtoggle()">收合</button><button onclick="swclear()">清除</button></div>
+    <div id=swout class=meta>尚未執行</div>
+  </div>
+  <div class=card><h2>交易所相容性自檢</h2>
+    <div class=meta>幣安改 API 時不要等到下單才發現。開機會自動跑一次，這裡可以手動重跑。</div>
+    <div class=row style=margin-top:8px><button class=go onclick="pf()">執行自檢</button></div>
+    <div id=pfout class=meta>尚未執行</div>
+  </div>
+  <div class=card><h2>參數調整</h2>
+    <div class=meta>表單的值<b>只用於這次掃描</b>。要長期保留請「存成組合」；要讓實盤照這些值跑，按「套用到實盤」（寫入 Volume，重佈後仍有效）。</div>
+    <div class=row style=margin-top:8px>
+      <select id=psel style="flex:1;min-width:130px"><option value="">— 載入組合 —</option></select>
+      <button onclick="pload()">載入</button><button onclick="psave()">存成組合</button><button onclick="pdel()">刪除</button></div>
+    <div class=row>
+      <button onclick="ptoggle()">顯示/隱藏參數</button><button onclick="pclear()">清空表單</button>
+      <button class=go onclick="plive()">套用到實盤</button><button onclick="plivereset()">實盤回預設</button></div>
+    <div id=plivebox class=meta></div>
+    <div id=pform style=display:none></div>
+  </div>
+</div>
+</div>
+<script>
+const F=u=>fetch(u,{headers:{'X-PDH':'1'}});
+const $=id=>document.getElementById(id);
+const num=v=>typeof v==='number'?v:null;
+function T(rows,cols,cls){if(!rows||!rows.length)return '<div class=empty>（無）</div>';
+ return '<div class=scroll><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
+ rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v===undefined||v===null)v='';
+   let k='';if(typeof v==='number'){if(c==='r'||c==='pnl'||c==='upnl'||c[0]==='R'&&c.length<4||c==='total')k=v>0?'pos':v<0?'neg':''}
+   if(c==='label'||c==='reason'||c==='skipped')k+=' lbl';
+   return '<td class="'+k+'" title="'+String(v).replace(/"/g,'')+'">'+v}).join('')+'</tr>').join('')+'</table></div>'}
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));
+  document.querySelectorAll('.pane').forEach(p=>p.style.display=p.id===t.dataset.t?'':'none')});
+
+async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){$('hmeta').innerHTML='<span style=color:var(--down)>連線失敗：'+e.message+'</span>';return}
+ if(s.error){$('hmeta').innerHTML='<span style=color:var(--down)>後端錯誤：'+s.error+'</span>';return}
+ const e=s.equity||{},L=s.loop;
+ const lo=Object.keys(s.live_overrides||{}).length;
+ $('hmeta').innerHTML=`啟動 ${s.started||'—'} · 掃描 ${s.last_scan||'—'} · 迴圈 ${L?L.took+'s / '+L.symbols+' 檔':'—'}`+
+   (lo?` · <span style=color:var(--gold)>實盤覆蓋 ${lo} 項</span>`:'')+
+   (s.auth_on?'':' · <span style=color:var(--down)>未設定 DASH_PASSWORD：手動操作已停用</span>');
+ $('hstats').innerHTML=[
+   ['持倉',Object.keys(s.open||{}).length],['擁擠',s.watch.length],['觀察',s.observe.length],
+   ['訊號',s.signals.length],['已下單',s.trades.length],
+   ['可用',e.tier?Math.round(e.tier*(1-e.reserve_pct))+' U':'—']
+ ].map(([k,v])=>`<span class=stat>${k}<b>${v}</b></span>`).join('');
+ const hits=r=>r.hits||'';
+ const wcols=['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'];
+ $('watch').innerHTML=`
+ <div class=card><h2>擁擠名單 · 引擎正在盯</h2>${T(s.watch,wcols,1)}</div>
+ <div class=card><h2>觀察名單 · 24h 漲幅前 ${s.observe.length}</h2>
+   <div class=meta style=margin-bottom:8px>score = g/d/o/f 四項各 1 分 · g=48h漲幅 d=偏離MA20 o=OI增幅 f=資金費率 · 💥=24h跌超30% 🔥=24h漲超門檻（都直接進引擎）· 單位 %</div>
+   ${T(s.observe,wcols)}</div>
+ <div class=card><h2>錯誤與警告</h2><div class=meta>${(s.errors||[]).slice(-8).reverse().join('<br>')||'（無）'}</div></div>`;
+ const sig=s.signals.slice().reverse();
+ $('t_open').innerHTML=`<div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','fill','stop','qty','state','adopted'])}</div>`;
+ const ex=s.exchange||[];
+ $('t_ex').innerHTML=T(ex,['symbol','owner','amt','entry','upnl']);
+ document.querySelectorAll('#t_ex tr').forEach((tr,i)=>{if(i&&ex[i-1]){tr.style.cursor='pointer';tr.onclick=()=>{$('mx').value=ex[i-1].symbol;$('mout').innerHTML=''}}});
+ const cur=$('mx').value;   // 保留使用者目前的選擇
+ $('mx').innerHTML='<option value="">— 選幣 —</option>'+ex.map(p=>`<option value="${p.symbol}">${p.symbol}（${p.owner}·${p.amt>0?'多':'空'}）</option>`).join('')+
+   (cur&&!ex.some(p=>p.symbol===cur)?`<option value="${cur}">${cur}（已不在帳號）</option>`:'');
+ $('mx').value=cur;
+ $('t_rest').innerHTML=`
+ <div class=card><h2>已平倉 · 最新在上</h2>${T((s.closed||[]).slice().reverse().slice(0,30),['closed','symbol','engine','side','fill','exit','pnl','r','qty','by'])}</div>
+ <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
+   ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','stop_error','reason'])}</div>`}
+
+
+async function bt(){const o=$('btout');o.innerHTML='跑中…';
+ const r=await (await F('/api/backtest?s='+$('bs').value+'&d='+$('bd').value)).json();
+ if(r.error){o.innerHTML='錯誤: '+r.error;return}
+ o.innerHTML=`<b>${r.symbol}</b> ${r.bars} 根<br>`+T(r.summary,['engine','n','win','exp','pf','best','worst'])+'<br>'+
+  T(r.trades.slice().reverse(),['time','engine','side','entry','exit','r','reason','bars'])}
+async function dg(){const o=$('btout');o.innerHTML='診斷中…';
+ const r=await (await F('/api/diag?s='+$('bs').value+'&d='+$('bd').value)).json();
+ if(r.error){o.innerHTML='錯誤: '+r.error;return}const c=r.counts;
+ o.innerHTML=`<b>${r.symbol}</b> ${c.bars} 根 · hot ${c.hot} · pivot ${c.pivot} · top ${c.top} · vol ${c.vol} · first ${c.first} · (div ${c.div}) · 跌破中樞 ${c.brk} · 全部成立 ${c.all}<br>`+
+  T(r.breaks.slice().reverse(),['time','close','zd','zg','width','hot','pivot','top','vol','first','fire'])}
+
+let swOpen=true;function swtoggle(){swOpen=!swOpen;swload()}
+async function swclear(){if(!confirm('清除掃描結果？（K 線快取保留）'))return;await F('/api/sweep/clear');swload()}
+async function sw(){const o=pcollect();
+ const lbl=$('sl').value||Object.entries(o).map(([k,v])=>k.split('.').slice(-2).join('.')+'='+v).join(' ')||'預設';
+ const r=await (await F('/api/sweep/start?d='+$('sd').value+'&m='+$('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
+ if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
+async function swload(){const o=$('swout');const r=await (await F('/api/sweep')).json();
+ const runs=r.runs&&r.runs.length?'<h2 style=margin-top:10px>歷次比較</h2>'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G']):'';
+ if(!r.status){o.innerHTML='尚未執行'+runs;return}
+ let h='<b>'+r.status+'</b>'+runs;
+ if(swOpen){
+  if(r.summary&&r.summary.length)h+='<h2 style=margin-top:10px>各引擎彙整</h2>'+T(r.summary,['engine','n','win','exp','pf','best','worst']);
+  if(r.results&&r.results.length)h+='<h2 style=margin-top:10px>每檔事件</h2>'+T(r.results,['symbol','peak_day','pump','dump','trades','R_A','R_B','R_C','R_D','R_E','R_F','R_G']);
+  if(r.trades&&r.trades.length)h+='<h2 style=margin-top:10px>最大單筆</h2>'+T(r.trades,['symbol','time','engine','side','entry','exit','r','reason']);
+ }else h+='<div class=meta>（明細已收合）</div>';
+ o.innerHTML=h;
+ if(!r.status.startsWith('完成')&&!r.status.startsWith('失敗'))setTimeout(swload,5000)}
+
+let PS=[],PRE={},LIVE={};
+function ptoggle(){const p=$('pform');p.style.display=p.style.display=='none'?'':'none';if(!PS.length)pform()}
+function pclear(){document.querySelectorAll('.pv').forEach(i=>i.value='')}
+function pfill(form){pclear();for(const [k,v] of Object.entries(form||{})){const el=document.querySelector('.pv[data-k="'+k+'"]');if(el)el.value=v}}
+async function pmeta(q){const r=await (await F('/api/presets'+(q||''))).json();if(r.error){alert(r.error);throw new Error(r.error)}PRE=r.presets||{};LIVE=r.live||{};
+ $('psel').innerHTML='<option value="">— 載入組合 —</option>'+Object.keys(PRE).map(n=>`<option>${n}</option>`).join('');
+ const n=Object.keys(LIVE).length;
+ $('plivebox').innerHTML=n?`實盤目前覆蓋 <b>${n}</b> 項：`+Object.entries(LIVE).map(([k,v])=>k.split('.').slice(-1)+'='+v).join('、'):'實盤目前使用程式預設值';}
+async function pload(){if(!PS.length)await pform();const n=$('psel').value;if(!n)return;pfill(PRE[n]);$('pform').style.display=''}
+async function psave(){const n=prompt('組合名稱：');if(!n)return;
+ await pmeta('?act=save&name='+encodeURIComponent(n)+'&form='+encodeURIComponent(JSON.stringify(pcollect())));alert('已存：'+n)}
+async function pdel(){const n=$('psel').value;if(!n||!confirm('刪除組合 '+n+'？'))return;await pmeta('?act=del&name='+encodeURIComponent(n))}
+async function plive(){const f=pcollect();if(!Object.keys(f).length){alert('表單是空的');return}
+ if(!confirm('把這 '+Object.keys(f).length+' 項套用到實盤？立即生效，重佈後仍有效。'))return;
+ await pmeta('?act=live&form='+encodeURIComponent(JSON.stringify(f)));alert('已套用到實盤');load()}
+async function plivereset(){if(!confirm('實盤參數回到程式預設？'))return;await pmeta('?act=live&form=%7B%7D');alert('已回預設');load()}
+async function pform(){if(!PS.length)PS=await (await F('/api/params')).json();
+ await pmeta();
+ let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+=(h?'</div>':'')+'<div class=pgrp><h3>'+g+'</h3>'}
+  h+=`<div class=p><label>${s.label} <span class=meta>(${s.default}${s.unit?' '+s.unit:''})</span></label>
+   <input class=pv data-k="${s.k}" type=number step="${s.step}" placeholder="${s.default}"><div class=d>${s.help}</div></div>`}
+ $('pform').innerHTML=h+'</div>'}
+function pcollect(){const o={};document.querySelectorAll('.pv').forEach(i=>{if(i.value!=='')o[i.dataset.k]=Number(i.value)});return o}
+async function mpos(act){const o=$('mout');const sym=$('mx').value;if(!sym){o.innerHTML='請先選幣';return}
+ if(!confirm((act=='close'?'平倉 ':'認領 ')+sym+'？'))return;o.innerHTML='處理中…';
+ const r=await (await F('/api/pos?act='+act+'&s='+encodeURIComponent(sym)+'&e='+encodeURIComponent($('me').value||'?')+'&stop='+encodeURIComponent($('ms').value||''))).json();
+ o.innerHTML=r.error?'<span style=color:var(--down)>'+r.error+'</span>':r.msg;if(!r.error){$('ms').value='';$('mx').value=''}load()}
+async function pf(){const o=$('pfout');o.innerHTML='檢查中…';
+ const r=await (await F('/api/preflight')).json();
+ if(r.error){o.innerHTML='<span style=color:var(--down)>'+r.error+'</span>';return}
+ o.innerHTML=r.results.map(x=>`${x.status=='ok'?'✅':x.status=='warn'?'⚠️':'❌'} ${x.item}　<span class=meta>${x.msg||''}</span>`).join('<br>')}
+async function sigclear(){if(!confirm('清除「訊號」和「已平倉」紀錄？（已下單紀錄保留）'))return;await F('/api/signals/clear');load()}
+load();swload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>

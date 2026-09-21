@@ -1,6 +1,6 @@
 """可調參數的說明表：dashboard 用它畫表單，使用者只填數字/選項，不用寫 JSON。
 每項：group / key（config 路徑）/ label / unit / help（調大調小的意義）/ step"""
-import config as C
+from . import config as C
 
 SCHEMA = [
   dict(g="掃描與監控名單", k="SCAN.watch_chg24", label="進引擎的漲幅門檻", unit="%", step=5,

@@ -1,8 +1,9 @@
-# 實盤出場管理 vs 回測 一致性測試：python test_parity.py（不連網，全部用假交易所）
+# 實盤出場管理 vs 回測 一致性測試（不連網，全部用假交易所）
+# 在專案根目錄執行：python -m tests.test_parity
 import sys, types, os, random
 import tempfile; os.environ["DATA_DIR"]=tempfile.mkdtemp()
-import config as C; C.API_KEY="x"
-fake=types.ModuleType("binance"); sys.modules["binance"]=fake
+from app import config as C; C.API_KEY="x"
+fake=types.ModuleType("binance"); sys.modules["app.binance"]=fake
 S=dict(bars=[], now=0, pos_qty=0, orders=[], stops={}, sid=0)
 fake.round_qty=lambda s,q: f"{q:.0f}"
 def klines(sym, tf, limit): return [b for b in S["bars"] if b["t"] <= S["now"]][-limit:]
@@ -15,9 +16,9 @@ def so(sym, side, qty, px):
 fake.stop_order=so
 fake.cancel_order=lambda s,i: S["stops"].pop(i,None)
 fake.user_trades=lambda s: []
-import store, manager, backtest, signals
+from app import store, manager, backtest, signals
 manager._now = lambda: S["now"]
-from signals import Signal
+from app.signals import Signal
 
 def run_case(name, eid, side, bars, sig_i, entry, stop):
     # --- 回測 ---

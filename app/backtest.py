@@ -1,7 +1,7 @@
 """在 5m K 線上跑五個引擎（A/B/C 空、D/E 多），統一出場規則，輸出 R 倍數分布。"""
 import json, sys, time
-import binance as B, config as C, risk
-from signals import ENGINES
+from . import binance as B, config as C, risk
+from .signals import ENGINES
 
 def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
     trades, open_, last_exit = [], None, {}

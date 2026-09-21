@@ -1,6 +1,22 @@
 # 交接摘要（給新對話用）
 
+> **先讀 `BINANCE_LESSONS.md`**：幣安踩坑共用清單，三個專案（crypto-screener / gold-scalper /
+> pump-dump-hunter）內容相同。發現新坑就三份一起更新。
+
 把這個 zip 丟給 Claude，先讀這頁就能接上。程式碼細節看 README.md 和各 .py。
+
+## 目錄結構（2026-09-21 整理，對齊 gold-scalper）
+```
+app/                 程式全部在這裡，Dockerfile 只 COPY app
+  main.py            入口：HTTP 伺服器 + 背景迴圈 + API 路由（python -m app.main）
+  static/dashboard.html   網頁（原本內嵌在 server.py 裡）
+  binance.py         交易所客戶端（精度、Algo 條件單、槓桿上限）
+  manager.py         實盤出場管理（對應 backtest 的出場規則）
+  preflight.py       交易所相容性自檢 ← 可整支複製到另外兩個專案
+  signals.py scanner.py risk.py backtest.py sweep.py params.py presets.py config.py store.py telegram.py
+tests/test_parity.py 回測 vs 實盤出場一致性測試（python -m tests.test_parity）
+BINANCE_LESSONS.md   三專案共用的踩坑清單
+```
 
 ## 這是什麼
 小幣拉高崩盤的極短線策略。Zeabur 部署（tzujen-pump-dump-hunter.zeabur.app），純標準庫 Python，

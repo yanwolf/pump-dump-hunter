@@ -6,8 +6,8 @@
 規則順序、判斷條件和 backtest.simulate 一模一樣；改其中一邊，另一邊要一起改。
 """
 import time
-import binance as B, config as C, store, telegram
-from signals import ENGINE_TF
+from . import binance as B, config as C, store, telegram
+from .signals import ENGINE_TF
 
 TF_MS = {"1m": 60_000, "5m": 300_000}
 

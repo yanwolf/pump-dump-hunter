@@ -4,7 +4,7 @@
 介面（server.py 用）：all / all_presets / live / save_preset / delete_preset / set_live / apply_live / boot
 """
 import json, os, copy, threading
-import config as C, params
+from . import config as C, params
 
 DATA_DIR = os.environ.get("DATA_DIR", "./data"); os.makedirs(DATA_DIR, exist_ok=True)
 PATH = os.path.join(DATA_DIR, "presets.json")

@@ -1,6 +1,6 @@
 """純標準庫的 Binance Futures 客戶端。公開資料不需 key；下單需要。"""
 import decimal, hashlib, hmac, json, time, urllib.error, urllib.parse, urllib.request
-import config as C
+from . import config as C
 
 def _open(req):
     """把 Binance 的錯誤內文帶出來，否則只看到 HTTP 400 不知道哪裡錯。"""

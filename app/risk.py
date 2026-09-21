@@ -1,6 +1,6 @@
 """倉位 = 由止損距離反推，槓桿只是結果；本金用階梯值。"""
 import math, time
-import config as C
+from . import config as C
 
 _bal = dict(t=0, balance=None, error=None)
 
@@ -16,7 +16,7 @@ def equity_now():
     if not (S["use_live_balance"] and C.API_KEY): return S["base"], None
     if time.time() - _bal["t"] > S["refresh_sec"]:
         try:
-            import binance as B
+            from . import binance as B
             _bal.update(balance=B.wallet_balance(), error=None)
         except Exception as e:
             _bal["error"] = str(e)

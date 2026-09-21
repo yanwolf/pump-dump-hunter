@@ -1,7 +1,7 @@
 """三個進場引擎。輸入 5m K 線 list（dict t,o,h,l,c,v），輸出 Signal 或 None。
 全部只做空；每個引擎在同一根 K 線上判斷，方便回測與實盤共用。"""
 from dataclasses import dataclass
-import config as C
+from . import config as C
 
 @dataclass
 class Signal:

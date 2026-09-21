@@ -1,8 +1,8 @@
 """掃描層：24h 漲幅前 N 檔逐一算熱度，四項條件計分；>= min_score 進擁擠名單。
 回傳 (watch, observe)：watch 是進場引擎要盯的，observe 是全部候選給 dashboard 看。"""
 import time
-import binance as B
-import config as C
+from . import binance as B
+from . import config as C
 
 def sma(xs, n):
     return sum(xs[-n:]) / n if len(xs) >= n else None

@@ -25,7 +25,8 @@ def start(days=30, overrides=None, label="", mode="pump"):
     if running(): return False
     env = dict(os.environ, SWEEP_DAYS=str(days), SWEEP_LABEL=label or "", SWEEP_MODE=mode,
                SWEEP_OVERRIDES=json.dumps(overrides or {}, ensure_ascii=False))
-    _proc = subprocess.Popen([sys.executable, os.path.abspath(__file__)], env=env, cwd=os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 專案根目錄，子程序要以套件方式啟動
+    _proc = subprocess.Popen([sys.executable, "-m", "app.sweep"], env=env, cwd=root)
     return True
 
 def clear():
@@ -116,7 +117,7 @@ def find_pumps(days, B):
     return events
 
 def main():
-    import binance as B, config as C, backtest
+    from . import binance as B, config as C, backtest
     days = int(os.environ.get("SWEEP_DAYS", "30")); label = os.environ.get("SWEEP_LABEL", "")
     mode = os.environ.get("SWEEP_MODE", "pump")
     W = {"crash": CRASH, "pumpday": PUMP}.get(mode, EVENT)
