@@ -1,6 +1,6 @@
 # 清單 r28 → r30 差異的行為測試。模擬交易所的成交價 ≠ 標記價（清單用法第 5 點 r30），出場價用錯哪一個都分得出來。
 # 在專案根目錄執行：python -m tests.test_r30
-from tests.harness import (B, TG, check, fresh, finish, main, manager, run, since, store,
+from tests.harness import (one, B, TG, check, fresh, finish, main, manager, run, since, store,
                            time)   # 共用案例框架（清單用法第 5 點 r27）
 from scripts.check_returns import TARGETS, check_file, count_returns
 
@@ -101,8 +101,7 @@ fx = fresh()
 store.update(pending={"XUSDT": dict(engine="C", side="LONG", time="t", entry=1.0, stop=0.9, ts=None, base_qty=0)})
 main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
 check("Q6", "（前提）對帳跑完", e is None, f"err={e}")
-check("Q6", "時間戳是 None → 不拋錯、不卡住（判定逾時並講明原因）", not store.get().get("pending") and any("時間戳" in m for m in TG),
-      f"pending={store.get().get('pending')} TG={TG}")
+check("Q6", "時間戳是 None → 不拋錯、不卡住（判定逾時並講明原因）", not store.get().get("pending") and one("ℹ️ XUSDT 引擎C 的 pending 沒有有效的時間戳")[0], f"pending={store.get().get('pending')} {one('ℹ️ XUSDT 引擎C 的 pending 沒有有效的時間戳')[1]}")
 
 # =====================================================================
 print("用法第 5 點 r29：錯誤掃描要攔到所有模組（程式裡只 print 的錯誤也要進得來）")
@@ -115,7 +114,6 @@ presets.set_live({"SCAN.watch_chg24": 15})
 r, e = run(presets.apply_live)
 presets.C.apply_overrides = orig_apply; presets.set_live({})
 check("Q8", "（前提）套用參數真的走到出錯那一步", e is None)
-check("Q8", "套用實盤參數失敗 → 進錯誤區並推播（原本只 print）", any("套用參數時出錯" in x for x in store.get().get("errors", [])) and
-      any("套用參數時出錯" in m for m in TG), f"errors={store.get().get('errors', [])[-1:]} TG={TG}")
+check("Q8", "套用實盤參數失敗 → 進錯誤區並推播（原本只 print）", any("套用參數時出錯" in x for x in store.get().get("errors", [])) and one("🐞 套用實盤參數覆蓋失敗", "套用參數時出錯")[0], f"{one('🐞 套用實盤參數覆蓋失敗', '套用參數時出錯')[1]}")
 
 finish(allowed=("套用參數時出錯",))

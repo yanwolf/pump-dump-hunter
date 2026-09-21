@@ -29,6 +29,7 @@ manager.telegram.send = telegram.send; main.telegram.send = telegram.send
 # 情境會換掉的模組層級物件：fresh() 一律還原（第 14 種）。新增要換的東西時加在這裡，tests/check_tests.py 也看這份清單
 RESET_ATTRS = [(B, "klines"), (B, "_get"), (manager, "_now"), (manager, "retry_stop"), (manager, "record_close"),
                (manager, "close_now"), (main.scanner, "scan"), (main, "reconcile"), (main, "tick"), (store, "push")]
+RESET_ATTRS = [(m, a) for m, a in RESET_ATTRS if hasattr(m, a)]   # 在舊版程式上重跑測試時（清單用法第 5 點 r32），略過不存在的
 ORIG = {(id(m), a): getattr(m, a) for m, a in RESET_ATTRS}
 
 fails, ALL_ERR = [], []
@@ -44,11 +45,22 @@ STDERR = _Tee(sys.stderr); sys.stderr = STDERR
 
 def selftest_modules():
     """前提（r29）：在框架底下讓不同模組各走一次真的出錯路徑，回傳攔到的模組。至少要攔到兩個。"""
-    got = set(); mark_e, mark_s = len(store.get().get("errors", [])), len(STDERR.lines)
-    manager._step_err("SELFTEST", "框架自檢", RuntimeError("manager 自檢錯誤"))
-    if any("manager 自檢錯誤" in x for x in store.get().get("errors", [])[mark_e:]): got.add("manager")
-    main._loop_step("框架自檢", lambda: (_ for _ in ()).throw(RuntimeError("main 自檢錯誤")))
-    if any("main 自檢錯誤" in x for x in STDERR.lines[mark_s:]) and any("main 自檢錯誤" in x for x in store.get().get("errors", [])): got.add("main")
+    import threading
+    got = set(); mark_e = len(store.get().get("errors", []))
+    # 金絲雀寫到 stderr 的東西用另一個緩衝區接（清單用法第 5 點 r32）：traceback 的「Traceback」「Exception in thread」
+    # 那幾行不含注入標記，跟測試期間的輸出混在一起會被當成程式錯誤；分開也才分得出「真的沒 traceback」和「沒攔到」。
+    saved, canary = STDERR.lines, []
+    STDERR.lines = canary
+    try:
+        manager._step_err("SELFTEST", "框架自檢", RuntimeError("manager 自檢錯誤"))
+        if any("manager 自檢錯誤" in x for x in store.get().get("errors", [])[mark_e:]): got.add("manager")
+        main._loop_step("框架自檢", lambda: (_ for _ in ()).throw(RuntimeError("main 自檢錯誤")))
+        if any("main 自檢錯誤" in x for x in canary) and any("main 自檢錯誤" in x for x in store.get().get("errors", [])): got.add("main")
+        th = threading.Thread(target=lambda: (_ for _ in ()).throw(RuntimeError("執行緒金絲雀")), name="金絲雀")
+        th.start(); th.join()
+        if any("執行緒金絲雀" in x for x in canary) and any("Exception in thread" in x for x in canary): got.add("thread")
+    finally:
+        STDERR.lines = saved
     from app import presets
     orig = presets.C.apply_overrides
     presets.C.apply_overrides = lambda ov: (_ for _ in ()).throw(RuntimeError("presets 自檢錯誤"))
@@ -66,6 +78,9 @@ def check(tag, name, cond, detail="", infra=False):
     _counts["checks"] += 1
     fx_now = getattr(FakeBinance, "current", None)
     hits = "〔命中0〕〔基礎設施〕" if infra else (f"〔命中{fx_now.mut_hits}〕" if fx_now is not None else "")
+    if os.environ.get("PDH_AUDIT") and fx_now is not None:        # 第 22 種稽核：這個情境查成交明細時，部位是不是被直接改過
+        q = fx_now.trade_queries
+        hits = f"〔查成交{len(q)}次、未留成交{sum(x['untraced'] for x in q)}次〕" + hits
     print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
     if not cond: fails.append(tag)
 
@@ -73,13 +88,23 @@ def fresh(hedge=False, algo="ok"):
     """每個情境的第一句：新的模擬交易所、清快取、還原換掉的函式、清計數器與帳本。先把上一個情境的錯誤區與推播收進 ALL_ERR。"""
     ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
     fx = FakeBinance(hedge=hedge, algo=algo).install()
-    B._mode.update(hedge=None, t=0); B._F.clear(); B._algo.update(legacy_until=0.0)
+    B._mode.update(hedge=None, t=0); B._F.clear()
+    if hasattr(B, "_algo"): B._algo.update(legacy_until=0.0)
+    if hasattr(B, "_algo_ok"): B._algo_ok[0] = None           # r12 以前的永久旗標：在舊版程式上重跑時也要重設（第 14 種）
     for m, a in RESET_ATTRS: setattr(m, a, ORIG[(id(m), a)])
     main._rc["t"] = 0
-    manager._errs.clear(); main._loop_errs.clear(); manager._missing.clear()
+    for mod, name in ((manager, "_errs"), (main, "_loop_errs"), (manager, "_missing")):
+        if hasattr(mod, name): getattr(mod, name).clear()
     store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[], cool={})
     TG.clear()
     return fx
+
+def one(title, *must):
+    """指定哪一則推播（清單用法第 5 點第 21 種）：開頭是 title 的推播**恰好一則**，而且內容含 must 裡每一段字。
+    回傳 (是否成立, 說明)。不要在全部推播裡找關鍵字——別的推播也可能含同樣的字（r31、r32）。"""
+    hit = [m for m in TG if m.startswith(title)]
+    ok = len(hit) == 1 and all(k in hit[0] for k in must)
+    return ok, f"開頭「{title}」的推播 {len(hit)} 則" + (f"：{hit[0][:90]}" if hit else f"；全部推播={[m[:40] for m in TG]}")
 
 def run(fn):
     try: return fn(), None
@@ -97,7 +122,8 @@ def finish(allowed=()):
     check("H10", "（前提）有收集到各情境的錯誤區與推播，而且這支測試跑過斷言", len(ALL_ERR) > 0 and _counts["checks"] >= 1,
           f"收集 {len(ALL_ERR)} 則、斷言 {_counts['checks']} 項")
     got = selftest_modules()
-    check("H10", "（前提）錯誤攔截涵蓋至少兩個不同模組（r29）", len(got) >= 2, f"攔到 {sorted(got)}")
+    check("H10", "（前提）錯誤攔截涵蓋至少兩個不同模組（r29），而且背景執行緒的 traceback 攔得到（stderr 金絲雀，r32）",
+          len(got - {"thread"}) >= 2 and "thread" in got, f"攔到 {sorted(got)}")
     ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
     allowed = tuple(allowed) + ("自檢錯誤",)              # 上面自檢故意製造的錯誤
     scanned = ALL_ERR + STDERR.lines                     # 錯誤區、推播、標準錯誤（traceback）都掃

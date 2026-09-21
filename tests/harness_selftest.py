@@ -24,7 +24,10 @@ CASES = {
         'fx = fresh()\ntelegram.send("x")\ncheck("A", "基礎設施", True, infra=True)\nfinish()\n', 0, "〔命中0〕〔基礎設施〕"),
     "錯誤攔截涵蓋多個模組（manager、main、presets），至少兩個（r29 的前提）": (
         'fx = fresh()\ngot = selftest_modules()\nprint("攔到", sorted(got))\ntelegram.send("x")\n'
-        'check("A", "至少兩個模組", len(got) >= 2 and {"manager", "main", "presets"} <= got)\nfinish(allowed=("自檢錯誤",))\n', 0, "攔到 [\'main\', \'manager\', \'presets\']"),
+        'check("A", "至少兩個模組", len(got) >= 2 and {"manager", "main", "presets", "thread"} <= got)\nfinish(allowed=("自檢錯誤",))\n', 0, "攔到 [\'main\', \'manager\', \'presets\', \'thread\']"),
+    "金絲雀的 traceback 不會混進測試期間的錯誤掃描（用另一個緩衝區）": (
+        'fx = fresh()\ntelegram.send("x")\nselftest_modules()\nprint("混進", sum("金絲雀" in x or "自檢錯誤" in x for x in STDERR.lines))\n'
+        'check("A", "沒混進", not any("金絲雀" in x or "自檢錯誤" in x for x in STDERR.lines))\nfinish()\n', 0, "混進 0"),
     "只寫到標準錯誤的 traceback 也會被全域檢查掃到": (
         'import traceback\nfx = fresh()\ntelegram.send("x")\ntry: {}["k"]\nexcept KeyError: traceback.print_exc()\n'
         'check("A", "正常", True)\nfinish()\n', 1, "沒有非注入的程式錯誤"),
@@ -34,7 +37,7 @@ CASES = {
 
 fails = 0
 for name, (body, want_code, want_text) in CASES.items():
-    code = "from tests.harness import (B, TG, check, finish, fresh, main, manager, selftest_modules, store, telegram)\n" + body
+    code = "from tests.harness import (B, STDERR, TG, check, finish, fresh, main, manager, selftest_modules, store, telegram)\n" + body
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     ok = p.returncode == want_code and want_text in p.stdout
     print(f"  {'✅' if ok else '❌'} {name}" + ("" if ok else f"　結束碼={p.returncode} 輸出末段={p.stdout[-200:]!r} {p.stderr[-200:]!r}"))

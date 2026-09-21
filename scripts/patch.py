@@ -23,7 +23,7 @@ def apply(edits):
         head = old.strip().splitlines()[0][:70] if old.strip() else repr(old)
         if n != count:
             raise PatchAbort(f"❌ apply 中止（一個檔都沒寫）：第 {i} 處 {path} 預期命中 {count} 處，實際 {n} 處\n   比對字串開頭：{head}")
-        if old.endswith("\n") != new.endswith("\n"):
+        if new != "" and old.endswith("\n") != new.endswith("\n"):     # 整段刪除（替換成空字串）不檢查（清單用法第 5 點 r32）
             raise PatchAbort(f"❌ apply 中止（一個檔都沒寫）：第 {i} 處 {path} 舊字串與新字串結尾換行不一致，下一行會黏上來\n   比對字串開頭：{head}")
         buf[path] = s.replace(old, new)
     for path, s in buf.items(): open(path, "w", encoding="utf-8").write(s)
@@ -44,6 +44,9 @@ def self_test():
     except PatchAbort as e: results.append((f"同檔依序套用、跨檔一次寫入（{e}）", False))
     try: apply([(a, "丙", "三", 2)]); results.append(("次數不對 → 中止", False))
     except PatchAbort: results.append(("次數不對 → 中止", True))
+    open(b, "w").write("第一行\n要刪的一行\n第三行\n")
+    try: apply([(b, "要刪的一行\n", "")]); results.append(("整段刪除（換成空字串）不被換行檢查擋下", open(b).read() == "第一行\n第三行\n"))
+    except PatchAbort as e: results.append((f"整段刪除（換成空字串）不被換行檢查擋下（{e}）", False))
     bad = 0
     for name, ok in results: print(f"  {'✅' if ok else '❌'} {name}"); bad += not ok
     return bad

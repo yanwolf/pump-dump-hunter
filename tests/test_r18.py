@@ -1,6 +1,6 @@
 # 清單 r16 → r18 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安。
 # 在專案根目錄執行：python -m tests.test_r18
-from tests.harness import (ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
+from tests.harness import (one, ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
                            re, run, since, store, sys, telegram, time)   # 共用案例框架（清單用法第 5 點 r27）；明列名稱，pyflakes 才查得到未定義名稱
 
 
@@ -168,7 +168,7 @@ r, e = run(lambda: [main.tick(state) for _ in range(4)])
 main.scanner.scan = orig_scan; main.reconcile = orig_rec
 check("K7", "（前提）背景迴圈有可單獨呼叫的一輪（tick）", e is None, f"err={e}")
 check("K7", "掃描器與對帳都出錯 → 這一輪的停損守衛照樣補掛", any(o["symbol"] == "XUSDT" for o in fx.algo_orders.values()))
-check("K7", "迴圈步驟出錯要推播（不能只進錯誤區）", any("掃描器壞了" in m for m in TG) and any("對帳壞了" in m for m in TG), f"{TG[:3]}")
+check("K7", "迴圈步驟出錯要推播（不能只進錯誤區）", one("🐞 背景迴圈「掃描」出錯", "掃描器壞了")[0] and one("🐞 背景迴圈「對帳」出錯", "對帳壞了")[0], f"{one('🐞 背景迴圈「掃描」出錯', '掃描器壞了')[1]}；{one('🐞 背景迴圈「對帳」出錯', '對帳壞了')[1]}")
 
 # =====================================================================
 

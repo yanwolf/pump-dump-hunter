@@ -48,11 +48,25 @@ class FakeBinance:
         self.trades = []
         self.mutate = os.environ.get("PDH_MUTATE", "")
         self.fired = []                  # 注入觸發紀錄
+        self._traced = {}                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
+        self.trade_queries = []          # 每次查成交明細：{symbol, untraced}（清單用法第 5 點 r33：歸零不留成交）
         self.mut_hits = 0                # 突變命中次數（被突變的查詢在這個情境被呼叫了幾次）
 
     # ---------- 狀態輔助 ----------
     def open(self, symbol, side, qty, entry=None):
         self.pos[(symbol, side)] = [float(qty), entry or self.price]
+        self._traced[(symbol, side)] = float(qty)
+
+    def untraced(self, symbol):
+        """這個幣的部位數量，是不是被測試直接改過（沒有留下成交）。"""
+        keys = {k for k in list(self.pos) + list(self._traced) if k[0] == symbol}
+        return any(abs(self.qty(*k) - self._traced.get(k, 0.0)) > 1e-9 for k in keys)
+
+    def trigger(self, symbol, side, qty, px=None):
+        """交易所端的出場（停損觸發、App 手動平倉、ADL）：真的成交一筆，留下成交明細。
+        取代「直接把部位數量改掉」——那樣不會留成交，程式查成交明細時只能記未知（清單用法第 5 點 r33）。"""
+        self._reduce(symbol, side, qty, self.price if px is None else px)
+        return self.trades[-1]
 
     def qty(self, symbol, side):
         return self.pos.get((symbol, side), [0, 0])[0]
@@ -131,7 +145,9 @@ class FakeBinance:
                 dict(filterType="PRICE_FILTER", tickSize="0.0001"),
                 dict(filterType="MIN_NOTIONAL", notional="5")]) for s in ("XUSDT", "YUSDT")]}
         if path == "/fapi/v1/leverage": return {"leverage": int(p.get("leverage", 1))}
-        if path == "/fapi/v1/userTrades": return [t for t in self.trades if t["symbol"] == p.get("symbol")]
+        if path == "/fapi/v1/userTrades":
+            self.trade_queries.append(dict(symbol=p.get("symbol"), untraced=self.untraced(p.get("symbol"))))
+            return [t for t in self.trades if t["symbol"] == p.get("symbol")]
         if path == "/fapi/v1/openAlgoOrders":
             if self.algo == "404": self._err(url, 404, "Not Found")
             return [o for o in self.algo_orders.values() if o["symbol"] == p.get("symbol", o["symbol"])]
@@ -196,20 +212,23 @@ class FakeBinance:
         self._add(s, "LONG" if side == "BUY" else "SHORT", q, px)
         return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
 
-    def _trade(self, s, side, q, px, pnl):
+    def _trade(self, s, side, q, px, pnl, pos_side):
         self.tid += 1
         self.trades.append(dict(id=self.tid, symbol=s, side=side, time=int(time.time() * 1000), qty=str(q), price=str(px),
-                                realizedPnl=str(round(pnl, 10)), commission=str(round(px * q * self.fee, 10))))
+                                realizedPnl=str(round(pnl, 10)), commission=str(round(px * q * self.fee, 10)),
+                                positionSide=pos_side if self.hedge else "BOTH"))   # 真的幣安成交明細有這個欄位
 
     def _add(self, s, side, q, px):
         cur = self.pos.get((s, side), [0, px])
         avg = (cur[0] * cur[1] + q * px) / (cur[0] + q)                   # 加權平均（真實交易所的 entryPrice）
         self.pos[(s, side)] = [cur[0] + q, avg]
-        self._trade(s, "BUY" if side == "LONG" else "SELL", q, px, 0.0)   # 開倉成交也在明細裡
+        self._traced[(s, side)] = self._traced.get((s, side), 0.0) + q
+        self._trade(s, "BUY" if side == "LONG" else "SELL", q, px, 0.0, side)   # 開倉成交也在明細裡
 
     def _reduce(self, s, side, q, px):
         cur = self.pos[(s, side)]
         pnl = (px - cur[1]) * q * (1 if side == "LONG" else -1)
-        self._trade(s, "SELL" if side == "LONG" else "BUY", q, px, pnl)
+        self._trade(s, "SELL" if side == "LONG" else "BUY", q, px, pnl, side)
         cur[0] -= q
+        self._traced[(s, side)] = self._traced.get((s, side), 0.0) - q
         if cur[0] <= 1e-9: del self.pos[(s, side)]

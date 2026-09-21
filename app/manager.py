@@ -47,7 +47,20 @@ def trades_after(sym, pos):
     side = "SELL" if pos.get("side") == "LONG" else "BUY"
     since = num(pos.get("ts")) or 0
     mark = num(pos.get("trade_mark")) or 0
-    return [t for t in rows if t.get("side") == side and (num(t.get("time")) or 0) >= since and (num(t.get("id")) or 0) > mark]
+    my_ps = pos.get("side")
+    return [t for t in rows if t.get("side") == side and (num(t.get("time")) or 0) >= since and (num(t.get("id")) or 0) > mark
+            # 雙向模式：成交明細有 positionSide，別人同幣反方向的開倉（方向同樣是 SELL/BUY）不是我的平倉（清單第 7 條）
+            and t.get("positionSide", "BOTH") in ("BOTH", my_ps)]
+
+def mark_now(sym):
+    """成交明細目前最後一筆的 id——開倉成交之後、認領當下記下來當起始界線（清單第 8 條 r32）。
+    之後的平倉成交才算這筆的；開倉前幾秒同幣的平倉成交（上一筆、別的專案）不會被算進來。查不到回 None（退回用時間）。"""
+    try:
+        ids = [num(t.get("id")) for t in B.user_trades(sym)]
+        ids = [i for i in ids if i is not None]
+        return max(ids) if ids else 0
+    except Exception as e:
+        _log(f"{sym} 記起始界線時查成交明細失敗 {e}"); return None
 
 def _segment(trades):
     """一段成交 → (平均成交價, 損益＝已實現−手續費, 數量, 最後一筆 id)。"""

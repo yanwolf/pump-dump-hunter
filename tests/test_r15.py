@@ -1,6 +1,6 @@
 # 清單 r13 → r15 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安。
 # 在專案根目錄執行：python -m tests.test_r15
-from tests.harness import (ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
+from tests.harness import (one, ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
                            re, run, since, store, sys, telegram, time)   # 共用案例框架（清單用法第 5 點 r27）；明列名稱，pyflakes 才查得到未定義名稱
 
 
@@ -73,7 +73,7 @@ main._rc["t"] = 0; main.reconcile(force=True)
 own = store.get().get("open", {}).get("XUSDT") or {}
 check("H3", "認領數量 = 現在 140 − 基準 40 = 100", own.get("qty") == 100, f"own.qty={own.get('qty')}")
 check("H3", "認領時記下基準數量，之後平倉／對帳要扣", own.get("base_qty") == 40, f"base_qty={own.get('base_qty')}")
-check("H3", "有基準部位時，通知講明均價是合併過的", any("合併" in m for m in TG), f"{TG}")
+check("H3", "有基準部位時，通知講明均價是合併過的", *one("♻️ 認領 XUSDT", "合併"))
 stops = [o for o in fx.algo_orders.values() if o["symbol"] == "XUSDT"]
 check("H3", "認領後掛的停損數量是 100（不是 140）", stops and float(stops[-1]["quantity"]) == 100, f"{stops}")
 

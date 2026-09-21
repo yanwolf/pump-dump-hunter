@@ -69,10 +69,11 @@ def reconcile(force=False):
                     fill = round((avg * (mine + base) - rec["base_px"] * base) / mine, 10)
                 else: fill = avg
                 stop = rec["stop"]
-                pos = dict(engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=rec.get("ts", now_ms),
+                pos = dict(engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=(rec["ts"] if manager.num(rec.get("ts")) is not None else now_ms),   # 值是 None 時 .get 的預設擋不住（r33）
                            bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), entry=rec["entry"], fill=fill, stop=stop, qty=qty,
                            base_qty=base, r_unit=abs(rec["entry"] - stop), risk_usdt=round(abs(rec["entry"] - stop) * qty, 4),
                            state="初始", adopted=True)
+                pos["trade_mark"] = manager.mark_now(sym)             # 起始界線：認領當下成交明細的最後一筆（清單第 8 條 r32）
                 ok = _protect(sym, pos)
                 own[sym] = pos; pend.pop(sym)
                 store.push("errors", f"{time.strftime('%m-%d %H:%M')} 認領 {sym}（引擎{pos['engine']}）數量 {qty:g} 均價 {fill:g}")
@@ -200,6 +201,9 @@ def place(sym, eid, sig, sz, rec):
                         risk_usdt=round(abs(sig.entry - stop_px) * qty, 4), state="初始")
         pend = dict(store.get().get("pending", {})); pend.pop(sym, None)
         store.update(open=own, pending=pend)
+        m0 = manager.mark_now(sym)                             # 起始界線：開倉成交之後成交明細的最後一筆（清單第 8 條 r32）
+        if m0 is not None:
+            own = dict(store.get().get("open", {})); own[sym] = dict(own[sym], trade_mark=m0); store.update(open=own)
     except Exception as e:
         # 帳沒記成：pending 還在，下一輪對帳會照交易所數量認領並立刻掛停損
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 成交後記帳失敗 {e}")
@@ -380,7 +384,8 @@ def manage(act, sym, eid="?", stop=None):
         own = dict(store.get().get("open", {}))
         own[sym] = dict(engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
                         ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty, r_unit=abs(entry - stop),
-                        risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), stop_via=so.get("via"), state="初始")
+                        risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), stop_via=so.get("via"), state="初始",
+                        trade_mark=manager.mark_now(sym))   # 起始界線（r32）
         store.update(open=own); _refresh()
         telegram.send(f"♻️ 手動認領 {sym} 引擎{eid}，已補掛停損 {stop}")
         return dict(ok=True, msg=f"{sym} 已認領並補掛停損 {stop}")

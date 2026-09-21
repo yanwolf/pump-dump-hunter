@@ -1,6 +1,6 @@
 # 清單 r10 → r12 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安（tests/fake_exchange.py）。
 # 在專案根目錄執行：python -m tests.test_r12
-from tests.harness import (ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
+from tests.harness import (one, ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
                            re, run, since, store, sys, telegram, time)   # 共用案例框架（清單用法第 5 點 r27）；明列名稱，pyflakes 才查得到未定義名稱
 
 
@@ -195,16 +195,14 @@ fx = fresh(); so = setup_open(fx)
 fx.inject.append(dict(path="/fapi/v1/algoOrder", method="DELETE", times=1, kind="http", code=503, body="busy"))
 pos = dict(store.get()["open"]["XUSDT"])
 run(lambda: manager.move_stop("XUSDT", pos, 1.0))
-check("E2", "移損時撤舊單失敗 → 當下就告警（第 1 次），不等平倉；原因要是注入的 503",
-      any("撤不掉" in m and "第 1 次" in m and "busy" in m for m in TG), f"{TG}")
+check("E2", "移損時撤舊單失敗 → 當下就告警（第 1 次），不等平倉；原因要是注入的 503", *one("⚠️ XUSDT 移損後舊停損單", "第 1 次", "busy"))
 
 fx = fresh(); setup_open(fx)
 pos = dict(store.get()["open"]["XUSDT"]); pos.update(want_stop=1.0, want_fail=3, guard_fail=2)
 manager._missing["XUSDT"] = 2
 manager.record_close("XUSDT", pos, "停損單", info={})
 check("E3", "（前提）平倉紀錄真的寫進去了", bool(store.get().get("closed")))
-check("E3", "失敗中部位被平掉 → 發收尾通知（移損／補掛失敗狀態隨平倉結束）",
-      any("隨平倉結束" in m or "收尾" in m for m in TG), f"{TG}")
+check("E3", "失敗中部位被平掉 → 發收尾通知（移損／補掛失敗狀態隨平倉結束）", *one("ℹ️ XUSDT 引擎C 已平倉（停損單）", "隨平倉結束"))
 check("E4", "平倉後補掛連續次數歸零，同幣下次進場不會接著數", not manager._missing.get("XUSDT"))
 fx = fresh(); setup_open(fx)
 p = dict(store.get()["open"]["XUSDT"]); p.update(want_stop=1.0, want_fail=3, guard_fail=2); store.update(open={"XUSDT": p})
@@ -212,7 +210,7 @@ manager._missing["XUSDT"] = 2
 fx.pos.clear()                                                 # 交易所上部位沒了（停損觸發）
 main._rc["t"] = 0; main.reconcile(force=True)                  # 第 9 種：走完整對帳，不單獨呼叫 record_close
 check("E3", "（前提）完整對帳真的把這筆記成平倉", bool(store.get().get("closed")))
-check("E3", "完整對帳發現平倉 → 收尾通知", any("隨平倉結束" in m for m in TG), f"{TG}")
+check("E3", "完整對帳發現平倉 → 收尾通知", *one("ℹ️ XUSDT 引擎C 已平倉（停損單）", "隨平倉結束"))
 check("E4", "完整對帳發現平倉 → 補掛次數歸零", not manager._missing.get("XUSDT"))
 
 # =====================================================================
@@ -221,6 +219,6 @@ fx = fresh(); setup_open(fx, qty=100)
 fx.pos[("XUSDT", "LONG")][0] = 60
 main._rc["t"] = 0; main.reconcile(force=True)
 own = store.get().get("open", {}).get("XUSDT") or {}
-check("G1", "對帳偵測數量從 100 變 60 → 更新帳上數量並通知", own.get("qty") == 60 and any("減少" in m for m in TG), f"qty={own.get('qty')} {TG}")
+check("G1", "對帳偵測數量從 100 變 60 → 更新帳上數量並通知", own.get("qty") == 60 and one("✂️ XUSDT 引擎C 交易所上的數量減少", "100 → 60")[0], f"qty={own.get('qty')} {one('✂️ XUSDT 引擎C 交易所上的數量減少', '100 → 60')[1]}")
 
 finish(allowed=())   # 本檔刻意注入的錯誤字串；其餘程式錯誤一律算失敗

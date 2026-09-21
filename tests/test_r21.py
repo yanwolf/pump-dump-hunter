@@ -1,6 +1,6 @@
 # 清單 r19 → r21 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安。
 # 在專案根目錄執行：python -m tests.test_r21
-from tests.harness import (ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
+from tests.harness import (one, ALL_ERR, B, C, FakeBinance, TG, check, fresh, finish, main, manager, os, preflight,
                            re, run, since, store, sys, telegram, time)   # 共用案例框架（清單用法第 5 點 r27）；明列名稱，pyflakes 才查得到未定義名稱
 
 
@@ -74,7 +74,7 @@ check("M5", "（前提）對帳真的走到 A 的結帳（出錯的那一步之�
 check("M5", "A 的平倉通知出錯 → 對帳不中斷", e is None, f"err={e}")
 check("M5", "A 出錯 → 排在後面的 X 照樣對帳（仍在帳上、交易所列表有更新）",
       "XUSDT" in store.get().get("open", {}) and any(x["symbol"] == "XUSDT" for x in store.get().get("exchange", [])))
-check("M5", "A 出錯要推播（不能只進錯誤區）", any("AUSDT" in m and ("出錯" in m) for m in TG), f"{TG}")
+check("M5", "A 出錯要推播（不能只進錯誤區）", *one("🐞 AUSDT 通知出錯", "通知送出失敗"))
 check("M5", "A 已經結帳、只是通知出錯 → 不能被放回帳上（否則下一輪重複結帳）",
       "AUSDT" not in store.get().get("open", {}), f"open={list(store.get().get('open', {}))}")
 
@@ -86,8 +86,7 @@ mark = len(fx.calls)
 run(lambda: manager.run())
 check("M6", "（前提）第二筆真的被送出撤單", any(c[0] == "DELETE" and c[2].get("algoId") == "5" for c in since(fx, mark)))
 check("M6", "殘留單清單第一筆壞掉 → 第二筆照樣重撤", 5 not in fx.algo_orders)
-check("M6", "壞掉那筆的錯誤要推播，而且那筆不能被靜靜丟掉", any("殘留" in m and "出錯" in m for m in TG) and "bad" in store.get().get("leftover", {}),
-      f"TG={TG[-2:]} leftover={list(store.get().get('leftover', {}))}")
+check("M6", "壞掉那筆的錯誤要推播，而且那筆不能被靜靜丟掉", one("⚠️ ? 殘留停損單 bad", "第 1 次")[0] and "bad" in store.get().get("leftover", {}), f"{one('⚠️ ? 殘留停損單 bad', '第 1 次')[1]} leftover={list(store.get().get('leftover', {}))}")
 
 # =====================================================================
 

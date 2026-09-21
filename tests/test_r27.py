@@ -1,7 +1,7 @@
 # 清單 r25 → r27 差異的行為測試。app/binance.py 真的會跑，只在 HTTP 層換成模擬幣安。
 # 通知只攔最底層的 telegram.send（它只收已經組好的字串），所以每則通知的格式化都真的會執行（清單第 8 條 r26）。
 # 在專案根目錄執行：python -m tests.test_r27
-from tests.harness import (B, TG, check, fresh, finish, main, manager, run, since, store,
+from tests.harness import (one, B, TG, check, fresh, finish, main, manager, run, since, store,
                            time)   # 共用案例框架（清單用法第 5 點 r27）
 from scripts.check_returns import TARGETS, check_file
 
@@ -43,14 +43,15 @@ check("P2", "（前提）程式真的去查了成交明細、而且查不到", a
 check("P2", "（前提）平倉單真的送出、交易所上確實平掉", fx.qty("XUSDT", "LONG") == 0 and
       any(c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true" for c in since(fx, mark)))
 check("P2", "缺成交價與進場價 → 照樣結帳", e is None and len(store.get().get("closed") or []) == 1, f"err={e}")
-check("P2", "缺成交價與進場價 → 出場通知真的組出來了，而且講明損益未知",
-      any("出場" in m and "損益未知" in m for m in TG) and not notify_errors(), f"{TG}")
+check("P2", "缺成交價與進場價 → 出場通知真的組出來了，而且講明損益未知", one("🏁 XUSDT 引擎C 時間出場", "損益未知")[0] and not notify_errors(), f"{one('🏁 XUSDT 引擎C 時間出場', '損益未知')[1]}")
 
 fx = fresh(); fx.open("XUSDT", "LONG", 100); own_pos(fx, fill=None)          # 成交價 None（交易所回應沒帶成交均價）
-fx.pos[("XUSDT", "LONG")][0] = 60                                          # 在 App 手動減碼
+fx.trigger("XUSDT", "LONG", 40)                                            # 在 App 手動減碼：交易所上真的成交一筆（清單用法第 5 點 r33）
 main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
 own = store.get().get("open", {}).get("XUSDT") or {}
 check("P3", "（前提）對帳真的偵測到數量減少", own.get("qty") == 60, f"qty={own.get('qty')} err={e}")
+part3 = (own.get("partials") or [{}])[-1]
+check("P3", "（前提）部分出場的損益真的算出來了（有成交可以算，不是沒進計算就記未知）", part3.get("pnl") is not None, f"{part3}")
 check("P3", "成交價是 None 時算部分出場損益不拋（.get(鍵, 預設) 擋不住值是 None）",
       not [m for m in store.get().get("errors", []) + TG if "TypeError" in m], f"{store.get().get('errors', [])[-1:]}")
 
@@ -66,10 +67,15 @@ check("P3", "last_t 是 None → 出場判斷不拋錯", not any("出場判斷�
 # =====================================================================
 print("第 8 條 r27：損益未知不能被當成 0 或虧損")
 fx = fresh(); fx.open("XUSDT", "LONG", 100); own_pos(fx, fill=None)
-fx.pos[("XUSDT", "LONG")][0] = 60                                          # 部分出場，但成交價未知 → 這一段損益未知
+fx.trigger("XUSDT", "LONG", 40)                                            # 部分出場：交易所上真的成交一筆
+fx.inject.append(dict(path="/fapi/v1/userTrades", times=1, kind="empty"))  # 但成交明細查不到 → 這一段損益未知（原因在測試裡明寫，第 22 種）
+mark = len(fx.calls)
 main._rc["t"] = 0; main.reconcile(force=True)
 part = ((store.get().get("open", {}).get("XUSDT") or {}).get("partials") or [{}])[-1]
 check("P4", "（前提）部分出場有記下來", bool(part))
+check("P4", "（前提）未知的原因是成交明細查不到：程式查了、注入真的觸發了，而且交易所上確實有那筆成交（第 16 種）",
+      any(c[1] == "/fapi/v1/userTrades" for c in since(fx, mark)) and any(f["path"] == "/fapi/v1/userTrades" for f in fx.fired)
+      and not fx.untraced("XUSDT"))
 check("P4", "部分出場的損益未知 → 記成 None，不是 0", part.get("pnl", "缺") is None, f"partial={part}")
 p = dict(store.get()["open"]["XUSDT"]); p["fill"] = 1.0
 # 成交明細查不到 → 只能靠自己估算（有成交明細時以交易所為準，那是對的；r27 要防的是估算時把未知那段當 0）
@@ -78,6 +84,6 @@ r, e = run(lambda: manager.close_now("XUSDT", p, "時間"))
 rec = (store.get().get("closed") or [{}])[-1]
 check("P4", "（前提）剩下的部位平掉、結帳了", fx.qty("XUSDT", "LONG") == 0 and bool(rec), f"err={e}")
 check("P4", "有一段損益未知 → 整筆的損益也是未知（不能把未知那段當 0 加總）", rec.get("pnl") is None, f"pnl={rec.get('pnl')}")
-check("P4", "平倉通知（🏁）講明損益未知", any(m.startswith("🏁") and "損益未知" in m for m in TG), f"{TG[-1:]}")
+check("P4", "平倉通知（🏁）講明損益未知", *one("🏁 XUSDT 引擎C 時間出場", "損益未知"))
 
 finish()
