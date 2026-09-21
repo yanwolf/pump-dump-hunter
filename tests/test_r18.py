@@ -18,7 +18,9 @@ ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.r
 
 fails = []
 def check(tag, name, cond, detail=""):
-    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else ""))
+    fx_now = getattr(FakeBinance, "current", None)       # 印出這個情境到目前為止的突變命中次數，給 mutation_check 自動判定「無關」
+    hits = f"〔命中{fx_now.mut_hits}〕" if fx_now is not None else ""
+    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
     if not cond: fails.append(tag)
 
 ALL_ERR = []
@@ -80,11 +82,11 @@ check("K2", "平倉前確認就回空清單 → 不能當成「已經沒了」�
 fx = fresh(); fx.open("XUSDT", "LONG", 100); so = own_pos(fx)
 fx.inject.append(REJECT_CLOSE())
 p = dict(store.get()["open"]["XUSDT"])
-orig_get = B._get; calls_sym = []
-def get_then_empty(path, params=None, base=None, signed=False):     # 第一次逐幣查（平倉前）正常，之後都回空
-    if path == "/fapi/v2/positionRisk" and params and "symbol" in params:
-        calls_sym.append(1)
-        if len(calls_sym) >= 2: return []
+orig_get = B._get
+def get_then_empty(path, params=None, base=None, signed=False):
+    # 「平倉單送出之後」逐幣查詢才回空——綁在被測那一步上，不用「第幾次查詢」計數（清單用法第 5 點第 18 種）
+    closed_sent = any(c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true" for c in fx.calls)
+    if closed_sent and path == "/fapi/v2/positionRisk" and params and "symbol" in params: return []
     return orig_get(path, params, base, signed)
 B._get = get_then_empty
 mark = len(fx.calls)
@@ -207,7 +209,8 @@ check("K7", "迴圈步驟出錯要推播（不能只進錯誤區）", any("掃�
 
 # =====================================================================
 print("用法第 5 點：通知在 try 裡的錯誤不能被吞")
-ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
+fresh()                                                  # 全域檢查自成一個情境：不繼承上一個情境的突變命中次數（fresh 會先收集錯誤區與推播）
+check("H10", "（前提）有收集到各情境的錯誤區與推播", len(ALL_ERR) > 0)
 bugs = [x for x in ALL_ERR if any(k in x for k in ("NameError", "AttributeError", "TypeError", "KeyError", "is not defined"))
         and "模擬的程式錯誤" not in x]
 check("H10", "所有情境裡沒有非注入的程式錯誤", not bugs, f"{bugs[:3]}")

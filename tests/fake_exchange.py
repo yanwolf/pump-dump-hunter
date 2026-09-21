@@ -41,6 +41,8 @@ class FakeBinance:
         self.calls = []                  # (method, path, params)
         self.trades = []
         self.mutate = os.environ.get("PDH_MUTATE", "")
+        self.fired = []                  # 注入觸發紀錄
+        self.mut_hits = 0                # 突變命中次數（被突變的查詢在這個情境被呼叫了幾次）
 
     # ---------- 狀態輔助 ----------
     def open(self, symbol, side, qty, entry=None):
@@ -74,6 +76,7 @@ class FakeBinance:
     # ---------- 安裝 ----------
     def install(self):
         urllib.request.urlopen = self._urlopen
+        FakeBinance.current = self       # 測試的 check() 用來印出這個情境的突變命中次數
         return self
 
     def _err(self, url, code, body): raise _HTTPErr(url, code, body)
@@ -85,11 +88,19 @@ class FakeBinance:
         raw = (req.data or b"").decode() or (url.split("?", 1)[1] if "?" in url else "")
         params = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
         self.calls.append((method, path, params))
+        # 突變命中：被突變的函式（逐幣部位查詢）在這個情境被「呼叫」了幾次——不管最後是注入還是突變回的（清單用法第 5 點 r23）。
+        # 只算突變分支實際執行的次數會漏掉「情境自己的注入先回了空清單」的項目，把它們錯判成「無關」。
+        if self.mutate == "no_base" and path == "/fapi/v2/positionRisk" and "symbol" in params: self.mut_hits += 1
 
         for rule in list(self.inject):
             if rule["path"] != path: continue
             if rule.get("method") and rule["method"] != method: continue
             if rule.get("match") and not rule["match"](params): continue
+            # 記錄每次注入是被哪一張請求觸發的（清單用法第 5 點第 18 種：注入條件太寬，會在被測那一步之前就生效）
+            what = " ".join(f"{k}={params[k]}" for k in ("symbol", "side", "type", "reduceOnly", "positionSide", "quantity", "algoId") if k in params)
+            self.fired.append(dict(n=len(self.calls), path=path, method=method, kind=rule["kind"], what=what))
+            if os.environ.get("PDH_INJECT_LOG"):
+                print(f"      〔注入觸發〕第 {len(self.calls)} 個請求 {method} {path} {what} → {rule['kind']} {rule.get('code', '')}")
             rule["times"] -= 1
             if rule["times"] <= 0: self.inject.remove(rule)
             if rule.get("then_execute"):                       # 交易所端執行了，但回應在路上丟了
@@ -105,7 +116,7 @@ class FakeBinance:
         if path == "/fapi/v1/positionSide/dual": return {"dualSidePosition": self.hedge}
         if path == "/fapi/v2/positionRisk":
             if "symbol" in p:
-                if self.mutate == "no_base": return []                 # 突變：逐幣查詢回空清單
+                if self.mutate == "no_base": return []                 # 突變：逐幣查詢回空清單（命中次數在上面算）
                 return self.rows(p["symbol"])
             return self.rows()
         if path == "/fapi/v1/exchangeInfo":

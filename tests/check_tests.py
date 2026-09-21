@@ -11,7 +11,7 @@
 """
 import ast, re, sys
 
-FILES = ["tests/test_r12.py", "tests/test_r15.py", "tests/test_r18.py", "tests/test_r21.py"]
+FILES = ["tests/test_r12.py", "tests/test_r15.py", "tests/test_r18.py", "tests/test_r21.py", "tests/test_r24.py"]
 SHARED = ("B", "manager", "main", "preflight", "store", "telegram")
 # 刻意在匯入時換掉、整個測試檔都不變的（不算洩漏）
 ALLOW = {"telegram.send", "manager.telegram.send", "main.telegram.send", "time.sleep"}

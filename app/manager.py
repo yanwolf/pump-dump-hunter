@@ -48,26 +48,43 @@ def close_info(sym, pos, since_ms=None):
         _log(f"{sym} 抓出場價失敗 {e}"); return {}
 
 def record_close(sym, pos, by, info=None):
-    """持倉結束：撤掉殘留停損單（避免之後誤平到別的專案同幣的倉）、寫已平倉、記冷卻。"""
+    """持倉結束（交易所上確實已經沒有這個部位之後才呼叫）。
+    順序（清單第 8 條 r24）：
+      1. 算平倉紀錄——只用 .get()，缺欄位時損益記為未知，不能丟例外
+      2. 寫紀錄、移出帳、記冷卻、清計數  ← 界線：到這裡這筆就結完帳了
+      3. 撤剩下的停損單、收尾通知——各自 try，出錯推播，但不能讓這筆「結不了帳」
+    舊順序是「撤單 → 通知 → 算損益 → 寫紀錄」：通知一出錯，停損撤了、紀錄沒寫、部位還在帳上，
+    下一輪對帳再結一次、再錯一次，這筆永遠結不了帳。"""
+    try: info = close_info(sym, pos) if info is None else info
+    except Exception: info = {}
+    rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **(info or {}))
+    # ---- 界線 ----
+    store.push("closed", rec)
+    own = dict(store.get().get("open", {})); own.pop(sym, None); store.update(open=own)
+    cool = dict(store.get().get("cool", {})); cool[f"{sym}:{pos.get('engine')}"] = _now(); store.update(cool=cool)
+    _missing.pop(sym, None)                          # 補掛連續次數不能留給同幣下一筆（清單第 8 條 r12）
+    for k in [k for k in _errs if k[0] == sym]: _errs.pop(k)   # 出錯次數也一樣
+    # ---- 界線之後：不可逆的動作與通知，各自 try ----
     queued = set(store.get().get("leftover", {}))
     for oid, via in [(pos.get("stop_id"), pos.get("stop_via"))] + [tuple(x) for x in pos.get("stale_ids", [])]:
         if not oid or str(oid) in queued: continue       # 已在待撤清單的交給 sweep_leftovers，不重複告警
         try: B.cancel_order(sym, oid, via)          # 已觸發／已撤（-2011）在 cancel_order 裡視為正常
         except Exception as e:
-            queue_leftover(sym, oid, via, e)
-    # 失敗中的狀態隨部位平倉結束 → 收尾通知，不能無聲消失（清單第 8 條 r11）
-    open_fail = [f"移損到 {pos.get('want_stop'):.6g} 失敗 {pos['want_fail']} 次" if pos.get("want_fail") and pos.get("want_stop") is not None else None,
-                 f"補掛停損失敗 {pos['guard_fail']} 次" if pos.get("guard_fail") else None]
-    open_fail = [x for x in open_fail if x]
-    if open_fail:
-        telegram.send(f"ℹ️ {sym} 引擎{pos.get('engine')} 已平倉（{by}），" + "、".join(open_fail) + " 的狀態隨平倉結束")
-    _missing.pop(sym, None)                          # 補掛連續次數不能留給同幣下一筆（清單第 8 條 r12）
-    for k in [k for k in _errs if k[0] == sym]: _errs.pop(k)   # 出錯次數也一樣
-    info = close_info(sym, pos) if info is None else info
-    rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **info)
-    store.push("closed", rec)
-    cool = dict(store.get().get("cool", {})); cool[f"{sym}:{pos.get('engine')}"] = _now(); store.update(cool=cool)
+            try: queue_leftover(sym, oid, via, e)
+            except Exception as e2: _once_err(sym, "撤殘留停損", e2)
+    try:
+        # 失敗中的狀態隨部位平倉結束 → 收尾通知，不能無聲消失（清單第 8 條 r11）
+        open_fail = [f"移損到 {pos.get('want_stop'):.6g} 失敗 {pos['want_fail']} 次" if pos.get("want_fail") and pos.get("want_stop") is not None else None,
+                     f"補掛停損失敗 {pos['guard_fail']} 次" if pos.get("guard_fail") else None]
+        open_fail = [x for x in open_fail if x]
+        if open_fail:
+            telegram.send(f"ℹ️ {sym} 引擎{pos.get('engine')} 已平倉（{by}），" + "、".join(open_fail) + " 的狀態隨平倉結束")
+    except Exception as e: _once_err(sym, "收尾通知", e)
     return rec
+
+def _once_err(sym, stage, e):
+    """已結帳部位的後續步驟出錯：推播一次，不留計數給同幣下一筆。"""
+    _step_err(sym, stage, e); _errs.pop((sym, stage), None)
 
 class CloseFailed(Exception):
     """平倉沒完成；close_now 已計數並依節奏告警，部位與停損都保留。"""
@@ -117,15 +134,22 @@ def close_now(sym, pos, by):
         raise CloseFailed(why)
 
     was = pos.pop("close_fail", 0); pos.pop("want_close", None)
-    info = dict(exit=px, pnl=round((px - pos["entry"]) * pos["qty"] * (1 if side == "LONG" else -1)
-                                   + sum(x.get("pnl", 0) for x in pos.get("partials", [])), 2) if px else None)
-    info.update({k: v for k, v in close_info(sym, pos).items() if v is not None})   # 成交明細優先，分段加總
-    rec = record_close(sym, pos, by, info)
-    own = dict(store.get().get("open", {})); own.pop(sym, None); store.update(open=own)
-    telegram.send(f"🏁 {sym} 引擎{pos.get('engine')} {by}出場" +
-                  (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
-                  (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else "") +
-                  (f"（先前平倉失敗 {was} 次，已恢復）" if was >= 1 else ""))
+    # 交易所上已經平掉了——從這裡開始不能丟例外（清單第 8 條 r24）：算損益只用 .get()，缺欄位記為未知
+    entry, q = pos.get("fill") or pos.get("entry"), pos.get("qty")
+    try:
+        pnl = round((px - entry) * q * (1 if side == "LONG" else -1)
+                    + sum((x or {}).get("pnl", 0) or 0 for x in pos.get("partials", [])), 2) if px and entry and q else None
+    except Exception: pnl = None
+    info = dict(exit=px, pnl=pnl)
+    try: info.update({k: v for k, v in close_info(sym, pos).items() if v is not None})   # 成交明細優先，分段加總
+    except Exception: pass
+    rec = record_close(sym, pos, by, info)                 # 寫紀錄、移出帳都在裡面
+    try:
+        telegram.send(f"🏁 {sym} 引擎{pos.get('engine')} {by}出場" +
+                      (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
+                      (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else "") +
+                      (f"（先前平倉失敗 {was} 次，已恢復）" if was >= 1 else ""))
+    except Exception as e: _once_err(sym, "出場通知", e)
     return rec
 
 def retry_close(sym, pos):
@@ -202,7 +226,7 @@ def ensure_stop(sym, pos):
     4. 只補掛、不平倉。補不上就大聲告警，交給人決定。
     """
     stops, ok = B.open_stops(sym)
-    if not ok: return                                     # 原則 1
+    if not ok: return "query_failed"                      # 原則 1
     oid = lambda o: o.get("algoId") or o.get("orderId")
     close_side = "SELL" if pos["side"] == "LONG" else "BUY"
     mine_ids = {pos.get("stop_id")} | {x[0] for x in pos.get("stale_ids", [])}
@@ -221,33 +245,35 @@ def ensure_stop(sym, pos):
             try: B.cancel_order(sym, oid(extra), pos.get("stop_via")); _log(f"{sym} 撤掉殘留停損 {oid(extra)}")
             except Exception: pass
         pos["stale_ids"] = [x for x in pos.get("stale_ids", []) if x[0] != pos["stop_id"] and x[0] in {oid(o) for o in stops}]
-        return
+        return "present"
     n = _missing.get(sym, 0) + 1; _missing[sym] = n
-    if n < 3: return                                      # 原則 2
+    if n < 3: return "waiting"                            # 原則 2
     # 補掛前逐幣確認自己的部位還在（扣基準）。部位其實已經沒了（對帳這輪出錯沒偵測到）時補掛，
     # 就是一張孤兒 reduce-only 單，單向共用帳號裡還可能平到別人同側的倉（清單第 7、13 條）。
     try:
         st, o = place_stop(sym, pos, pos["stop"])        # 確認部位、扣基準都在共用處（清單第 2 條 r19、r20）
-        if st != "ok": return                             # 查不到這輪不動；已沒了交給對帳
+        if st != "ok": return st                          # unknown：查不到這輪不動；gone：已沒了交給對帳（回傳原因，清單第 2 條 r24）
         pos["stop_id"] = o.get("orderId"); pos["stop_via"] = o.get("via"); _missing[sym] = 0
         was = pos.pop("guard_fail", 0)
         _log(f"{sym} 停損單不見了，已補掛 {pos['stop']}")
         telegram.send(f"🔧 {sym} 引擎{pos.get('engine')} 停損單不見了，已補掛 {pos['stop']:.6g}" +
                       (f"（先前失敗 {was} 次，已恢復）" if was else ""))
+        return "placed"
     except Exception as e:
         msg = str(e).lower()
         if "-2021" in msg:                                # 價格已穿過停損：停損本來就該觸發了 → 直接出場
             try: close_now(sym, pos, "停損"); return "closed"
-            except CloseFailed: return None
+            except CloseFailed: return "close_pending"
         if "existing" in msg or "already" in msg:         # 原則 3
             _missing[sym] = 0; _log(f"{sym} 停損其實在（補掛回報已存在），誤判")
             was = pos.pop("guard_fail", 0)
             if was >= 1: telegram.send(f"🔧 {sym} 停損單已確認存在（先前補掛失敗 {was} 次，已恢復）")
-            return
+            return "false_alarm"
         k = pos["guard_fail"] = pos.get("guard_fail", 0) + 1
         if nag(k):                                                          # 原則 4：只告警、不平倉
             telegram.send(f"🚨 {sym} 引擎{pos.get('engine')} 沒有停損單、補掛失敗（第 {k} 次）"
                           f"應掛 {pos['stop']:.6g}，錯誤：{e} — 請手動處理")
+        return "place_failed"
 
 def step(sym, pos):
     """處理這筆持倉自上次以來新收盤的 K 棒。回傳 "closed" 或 None（pos 會就地更新）。"""

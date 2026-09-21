@@ -18,7 +18,9 @@ ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.r
 
 fails = []
 def check(tag, name, cond, detail=""):
-    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else ""))
+    fx_now = getattr(FakeBinance, "current", None)       # 印出這個情境到目前為止的突變命中次數，給 mutation_check 自動判定「無關」
+    hits = f"〔命中{fx_now.mut_hits}〕" if fx_now is not None else ""
+    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
     if not cond: fails.append(tag)
 
 def fresh(hedge=False, algo="ok"):

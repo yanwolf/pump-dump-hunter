@@ -20,12 +20,15 @@ tests/test_r12.py     清單 r10→r12 差異的行為測試（python -m tests.t
 tests/test_r15.py     清單 r13→r15 差異的行為測試（python -m tests.test_r15）
 tests/test_r18.py     清單 r16→r18 差異的行為測試（python -m tests.test_r18）
 tests/test_r21.py     清單 r19→r21 差異的行為測試（python -m tests.test_r21）
-tests/mutation_check.py 突變檢查（逐項）：逐幣查詢回空，突變下仍通過的每一項都要在 tests/mutation_exempt.py 寫理由
+tests/test_r24.py     清單 r22→r24 差異的行為測試（python -m tests.test_r24）
+tests/mutation_selftest.py 突變檢查器的自我驗證（固定人造資料，python -m tests.mutation_selftest）
+tests/mutation_check.py 突變檢查（逐項）：逐幣查詢回空；命中 0 次自動判定無關，命中過的要在 tests/mutation_exempt.py 寫前提／對照組
+                      注入觸發紀錄：PDH_INJECT_LOG=1 python -m tests.test_xxx（核對注入是在被測那一步觸發，清單第 18 種）
 tests/check_tests.py  測試的靜態檢查：fresh() 重設換掉的東西、否定句斷言要有前提（python -m tests.check_tests）
 tests/fake_exchange.py 模擬幣安（HTTP 層）：舊端點條件單 -4120、空單負數、雙向兩列、逐幣查部位、無 Algo 環境，
                       可注入逾時／5xx／200 空清單／成交但回應丟失
 scripts/patch.py      改程式用的字串取代：必須恰好命中 N 次，否則中止（清單第 14 條 r15）
-部署前：所有 tests.test_* 都要過、python -m tests.check_tests 通過、python -m tests.mutation_check 通過、python -m pyflakes app/ 沒有 undefined name
+部署前：所有 tests.test_* 都要過、python -m tests.check_tests 通過、python -m tests.mutation_selftest 通過、python -m tests.mutation_check 通過、python -m pyflakes app/ 沒有 undefined name
 BINANCE_LESSONS.md   三專案共用的踩坑清單
 ```
 

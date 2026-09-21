@@ -242,8 +242,14 @@ def loop():
     except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} 自檢失敗 {e}")
     state = dict(watch={}, last={}, last_scan=0)
     while True:
-        tick(state)
-        time.sleep(POLL_SEC - time.time() % POLL_SEC + 2)     # 對齊整分後 2 秒：K 棒剛收完就判斷
+        run_tick(state)
+        try: time.sleep(POLL_SEC - time.time() % POLL_SEC + 2)   # 對齊整分後 2 秒：K 棒剛收完就判斷
+        except Exception: time.sleep(POLL_SEC)
+
+def run_tick(state):
+    """背景執行緒的進入點包一層（清單第 8 條 r23）：tick 裡每一步都有各自的 try，但 tick 本身（或 _loop_step）
+    出錯時，例外會讓整條執行緒結束——整支機器人停止運作，只在標準錯誤印一行。這裡接住、照節奏推播，下一輪照跑。"""
+    _loop_step("整輪", lambda: tick(state))
 
 _loop_errs = {}
 
@@ -375,6 +381,26 @@ def manage(act, sym, eid="?", stop=None):
         return dict(ok=True, msg=f"{sym} 已認領並補掛停損 {stop}")
     return dict(error="未知動作")
 
+def trade_action(act, sym, eid="?", stop=None):
+    """網頁觸發的交易操作入口（清單第 8 條 r24）。請求處理本身在另一條執行緒，例外穿出去時網頁只看到錯誤、
+    沒有推播，使用者要平倉的意圖也沒留下。這裡接住：回錯誤給網頁、照節奏推播；平倉在結帳前出錯就記待平倉，
+    之後每輪重試（manage 內容不動，只在外面包一層）。"""
+    try:
+        r = manage(act, sym, eid, stop)
+        manager._step_ok(sym, f"手動{act}")
+        return r
+    except Exception as e:
+        manager._step_err(sym, f"手動{act}", e)
+        note = ""
+        if act == "close":
+            try:
+                own = dict(store.get().get("open", {}))
+                if sym in own:                               # 還沒結帳（結帳會把它移出帳）→ 記待平倉
+                    own[sym] = dict(own[sym], want_close=own[sym].get("want_close") or "手動")
+                    store.update(open=own); note = "，已記為待平倉、每輪自動重試"
+            except Exception as e2: manager._step_err(sym, "記待平倉", e2)
+        return dict(error=f"{sym} 手動{act}出錯：{type(e).__name__}: {e}{note}")
+
 def norm_symbol(s):
     """AIN / ain / AINUSDT / ain/usdt 都變 AINUSDT；全是 U 本位。"""
     s = (s or "").strip().upper().replace("/", "").replace("-", "").replace(" ", "")
@@ -450,9 +476,9 @@ class H(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/pos"):
             import urllib.parse
             q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
-            try: res = manage(q.get("act", [""])[0], norm_symbol(q.get("s", [""])[0]),
-                              q.get("e", ["?"])[0], q.get("stop", [""])[0] or None)
-            except Exception as e: res = dict(error=str(e))
+            try: res = trade_action(q.get("act", [""])[0], norm_symbol(q.get("s", [""])[0]),
+                                    q.get("e", ["?"])[0], q.get("stop", [""])[0] or None)
+            except Exception as e: res = dict(error=str(e))      # 參數解析本身出錯（trade_action 自己不會往外拋）
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/preflight"):
             body, ct = json.dumps(preflight.check_throttled(), ensure_ascii=False).encode(), "application/json; charset=utf-8"

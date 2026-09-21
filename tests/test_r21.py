@@ -18,7 +18,9 @@ ORIG = dict(klines=B.klines, _get=B._get, now=manager._now, retry_stop=manager.r
 
 fails = []
 def check(tag, name, cond, detail=""):
-    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else ""))
+    fx_now = getattr(FakeBinance, "current", None)       # 印出這個情境到目前為止的突變命中次數，給 mutation_check 自動判定「無關」
+    hits = f"〔命中{fx_now.mut_hits}〕" if fx_now is not None else ""
+    print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
     if not cond: fails.append(tag)
 
 ALL_ERR = []
@@ -80,6 +82,7 @@ posted = stop_posts(since(fx, mark))
 check("M2", "（前提）移損真的掛出新停損", len(posted) == 1)
 check("M2", "新停損數量 = min(帳上 100, 交易所 120 − 基準 40) = 80", posted and float(posted[0][2].get("quantity", 0)) == 80, f"{posted}")
 
+fresh()                                                  # 靜態檢查自成一個情境
 check("M1", "送停損單只有一個共用的地方（app/ 裡 B.stop_order 只出現一次）",
       sum(len(re.findall(r"\bB\.stop_order\(", open(f"app/{f}", encoding="utf-8").read())) for f in ("main.py", "manager.py", "preflight.py")) == 1)
 
@@ -115,7 +118,7 @@ check("M6", "壞掉那筆的錯誤要推播，而且那筆不能被靜靜丟掉"
 
 # =====================================================================
 print("用法第 5 點：通知在 try 裡的錯誤不能被吞")
-ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
+fresh()                                                  # 全域檢查自成一個情境：不繼承上一個情境的突變命中次數（fresh 會先收集錯誤區與推播）
 bugs = [x for x in ALL_ERR if any(k in x for k in ("NameError", "AttributeError", "TypeError", "KeyError", "is not defined"))
         and "AUSDT" not in x and "bad" not in x]
 check("H10", "（前提）有收集到各情境的錯誤區與推播", len(ALL_ERR) > 0)
