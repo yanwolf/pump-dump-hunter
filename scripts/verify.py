@@ -45,6 +45,8 @@ for name, args in [("測試框架自我驗證", ["-m", "tests.harness_selftest"]
                    ("改寫工具 apply() 自我驗證", ["-m", "scripts.patch"]),
                    ("突變檢查器自我驗證", ["-m", "tests.mutation_selftest"]),
                    ("逐項突變檢查", ["-m", "tests.mutation_check"]),
+                   *[(f"全部測試跑專案裡存的舊版 {v}：測試／框架崩掉 0 支", ["-m", "tests.rerun_old", f"legacy:{v}"])
+                     for v in sorted(os.listdir("tests/legacy")) if os.path.isdir(os.path.join("tests/legacy", v))],
                    ("全部測試跑上一版程式：框架崩掉 0 支（需要 PDH_PREV 指向上一版目錄，沒設就略過）",
                     ["-c", "import os,subprocess,sys; p=os.environ.get('PDH_PREV'); sys.exit(subprocess.call([sys.executable,'-m','tests.rerun_old',p]) if p else 0)"])]:
     code, out = sh(*args)

@@ -50,12 +50,14 @@ class FakeBinance:
         self.trades = []
         self.mutate = os.environ.get("PDH_MUTATE", "")
         self.fired = []                  # 注入觸發紀錄
-        self._traced = {}                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
+        self._traced = {}
+        self.seen = set()                # 碰過的幣（全量表會列出它們，數量 0 也列）                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
         self.trade_queries = []          # 每次查成交明細：{symbol, untraced}（清單用法第 5 點 r33：歸零不留成交）
         self.mut_hits = 0                # 突變命中次數（被突變的查詢在這個情境被呼叫了幾次）
 
     # ---------- 狀態輔助 ----------
     def open(self, symbol, side, qty, entry=None):
+        self.seen.add(symbol)
         self.pos[(symbol, side)] = [float(qty), entry or self.price]
         self._traced[(symbol, side)] = float(qty)
 
@@ -79,20 +81,19 @@ class FakeBinance:
                     markPrice=str(self.price), unRealizedProfit=str(round(upnl, 8)))
 
     def rows(self, symbol=None):
-        """全量表：只列有部位的（程式本來就會濾掉 0）。逐幣：一定回這個幣的列，數量 0 也回。"""
+        """全量表：跟真的幣安一樣，交易過的幣都回，數量 0 的列也在（清單用法第 5 點 r31、r39：模擬環境不要有退化值——
+        只回有部位的列時，程式哪裡忘了濾掉 0，測試永遠看不出來）。逐幣：一定回這個幣的列，數量 0 也回。"""
         out = []
-        syms = [symbol] if symbol else sorted({s for s, _ in self.pos})
+        syms = [symbol] if symbol else sorted({s for s, _ in self.pos} | {t["symbol"] for t in self.trades} | set(self.seen))
         for s in syms:
             L, S = self.qty(s, "LONG"), self.qty(s, "SHORT")
             if self.hedge:
                 for side, q in (("LONG", L), ("SHORT", S)):
-                    if q or symbol:
-                        out.append(self._row(s, side, q if side == "LONG" else -q, self.pos.get((s, side), [0, 0])[1]))
+                    out.append(self._row(s, side, q if side == "LONG" else -q, self.pos.get((s, side), [0, 0])[1]))
             else:
                 net = L - S
-                if net or symbol:
-                    side = "LONG" if net > 0 else "SHORT"
-                    out.append(self._row(s, "BOTH", net, self.pos.get((s, side), [0, 0])[1]))
+                side = "LONG" if net > 0 else "SHORT"
+                out.append(self._row(s, "BOTH", net, self.pos.get((s, side), [0, 0])[1]))
         return out
 
     # ---------- 安裝 ----------

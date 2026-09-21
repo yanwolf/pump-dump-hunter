@@ -1,5 +1,5 @@
 """拿現在的測試跑舊版程式，失敗分三類（清單用法第 5 點 r35、r36）。在專案根目錄執行：
-    python -m tests.rerun_old <舊版專案目錄> [測試名 …]
+    python -m tests.rerun_old <舊版專案目錄 或 legacy:rNN> [測試名 …]
 - 斷言失敗：程式行為不對（這是要找的）
 - 被測程式拋錯：測試用 run() 接住的例外，細節裡有 err=（程式在那個版本會拋）
 - 測試／框架崩掉：沒印出總結，traceback 最後一層在 tests/（測試或框架在舊版上不能用，要修的是測試）
@@ -12,7 +12,12 @@ def main():
     if len(sys.argv) < 2: sys.exit(__doc__)
     old = sys.argv[1]; names = sys.argv[2:] or sorted(os.path.basename(p)[:-3] for p in glob.glob("tests/test_r*.py"))
     work = tempfile.mkdtemp()
-    shutil.copytree(old, work, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "data"))
+    if old.startswith("legacy:"):
+        # 專案裡存的舊版（tests/legacy/rNN，只有 app/）：拿現在的專案當底，把 app/ 換成舊版的
+        shutil.copytree(".", work, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "data", "legacy", ".git"))
+        shutil.rmtree(os.path.join(work, "app")); shutil.copytree(os.path.join("tests", "legacy", old[7:], "app"), os.path.join(work, "app"))
+    else:
+        shutil.copytree(old, work, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "data"))
     for f in glob.glob("tests/*.py"): shutil.copy(f, os.path.join(work, "tests"))
     os.makedirs(os.path.join(work, "scripts"), exist_ok=True)
     for f in glob.glob("scripts/*.py"): shutil.copy(f, os.path.join(work, "scripts"))

@@ -100,6 +100,14 @@ def fresh(hedge=False, algo="ok"):
     main._rc["t"] = 0
     for mod, name in ((manager, "_errs"), (main, "_loop_errs"), (manager, "_missing")):
         if hasattr(mod, name): getattr(mod, name).clear()
+    # 狀態檔相關的狀態（r37～r39 新增）：每新增一個，就加在這裡（第 14 種）。前一個情境可能把狀態檔弄壞、讓程式停在「還沒載入」
+    d = os.environ["DATA_DIR"]
+    for f in os.listdir(d):
+        if f.startswith("state.json"): os.remove(os.path.join(d, f))
+    for name, val in (("LOADED", True), ("LOAD_ERROR", None)):
+        if hasattr(store, name): setattr(store, name, val)
+    for name in ("_fail", "_load_fail"):
+        if isinstance(getattr(store, name, None), dict): getattr(store, name).update(n=0)
     store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[], cool={})
     TG.clear()
     return fx

@@ -44,12 +44,6 @@ def reconcile(force=False):
     - pending（送單結果不明）→ 交易所有這一側的部位就認領，數量與均價拿交易所的；沒有就等到 PENDING_TTL
     - 數量變少（在 App 手動減碼、或交易所端執行）→ 記一筆部分出場、通知、更新帳上數量
     回傳 (自己還在場的倉數, 交易所全部持倉)。"""
-    if not getattr(store, "LOADED", True):
-        # 持倉紀錄還沒載入：帳上是空的，拿它對帳會把交易所上的真實部位當成別人的、或當成已平倉——不動帳，講明（r38）
-        n = _loop_errs["未載入對帳"] = _loop_errs.get("未載入對帳", 0) + 1
-        if manager.nag(n): _say(lambda: f"⚠️ 持倉紀錄還沒載入（狀態檔讀取失敗），無法對帳（第 {n} 次）——交易所上的部位不會被認領或結帳，請處理狀態檔")
-        return 0, []
-    _loop_errs.pop("未載入對帳", None)
     if not force and time.time() - _rc["t"] < 20: return _rc["n"], _rc["ex"]   # 20 秒內重用，positionRisk 權重高，打太兇會被 418
     st = store.get()
     own, pend = dict(st.get("open", {})), dict(st.get("pending", {}))
@@ -154,10 +148,6 @@ def place(sym, eid, sig, sz, rec):
     """下單。順序：送單前寫 pending → 成交後立刻記帳 → 最後掛停損（清單第 3 條）。
     - 送單結果不明（逾時、5xx）→ 保留 pending 交給對帳；只有交易所明確拒絕才清掉（第 3 條 r12）
     - 成交後任何步驟丟例外都不能改寫「已成交」（第 8 條 r11）"""
-    if not getattr(store, "LOADED", True):
-        # 持倉紀錄還沒載入：開倉函式本身就擋（自動、手動都經過這裡，清單第 8 條 r38、r39）
-        rec["skipped"] = "持倉紀錄還沒載入（狀態檔讀取失敗），暫停開新倉"
-        return rec
     is_long = sig.side == "LONG"
     try: stop_px = float(B.round_price(sym, sig.stop))       # 實際掛出去的停損價（照 tickSize，第 4 條）
     except Exception: stop_px = sig.stop
@@ -296,7 +286,6 @@ def _scan(state):
 
 def tick(state):
     """背景迴圈的一輪：掃描 → 對帳 → 出場管理與守衛 → 訊號與下單，四步各自 try。"""
-    if not getattr(store, "LOADED", True): _loop_step("載入狀態", store.retry_load)   # 讀取失敗後每輪重試（r38）
     _loop_step("掃描", lambda: _scan(state))
     if TRADE and C.API_KEY:
         _loop_step("對帳", lambda: reconcile(force=True))       # 先對帳（被停損掉的移除）
@@ -385,7 +374,6 @@ def manage(act, sym, eid="?", stop=None):
         _refresh()
         return dict(ok=True, msg=f"{sym} 已平倉" + (f" @ {r['exit']:.6g}，損益 {r['pnl']:+.2f} U" if r.get("exit") and r.get("pnl") is not None else ""))
     if act == "adopt":
-        if not getattr(store, "LOADED", True): return dict(error=f"{sym} 持倉紀錄還沒載入（狀態檔讀取失敗），不能認領——認領會把部位寫進還沒載入的帳")
         if mine: return dict(error=f"{sym} 已經在帳上，不需要認領")
         if not stop: return dict(error="請填停損價")
         stop = float(stop); is_long = side == "LONG"
@@ -541,7 +529,6 @@ def run():
         if _p.get("live"): print("套用實盤參數覆蓋:", _p.get("live_name") or "自訂", _p["live"])
     except Exception as e:
         print("preset boot:", e); store.push("errors", f"{time.strftime('%m-%d %H:%M')} 開機套用參數失敗 {e}")
-    # 狀態檔讀取失敗時，store 載入當下就照節奏推播了（r39），這裡不重複
     threading.Thread(target=loop, daemon=True).start()
     port = int(os.environ.get("PORT", "8080")); print("listening", port)
     ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
