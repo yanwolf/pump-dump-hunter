@@ -23,13 +23,16 @@ def _get(path, params=None, base=None, signed=False):
     url = f"{base}{path}?{urllib.parse.urlencode(params)}"
     return _open(urllib.request.Request(url, headers=headers))
 
-def _post(path, params):
+def _post(path, params, method="POST"):
     params["timestamp"] = int(time.time() * 1000)
     q = urllib.parse.urlencode(params)
     sig = hmac.new(C.API_SECRET.encode(), q.encode(), hashlib.sha256).hexdigest()
     base = C.TESTNET if C.USE_TESTNET else C.FAPI
-    req = urllib.request.Request(f"{base}{path}", data=f"{q}&signature={sig}".encode(),
-                                 headers={"X-MBX-APIKEY": C.API_KEY}, method="POST")
+    if method == "DELETE":
+        req = urllib.request.Request(f"{base}{path}?{q}&signature={sig}", headers={"X-MBX-APIKEY": C.API_KEY}, method="DELETE")
+    else:
+        req = urllib.request.Request(f"{base}{path}", data=f"{q}&signature={sig}".encode(),
+                                     headers={"X-MBX-APIKEY": C.API_KEY}, method=method)
     return _open(req)
 
 # ---- 公開資料 ----
@@ -127,9 +130,12 @@ def market_order(symbol, side, qty, reduce_only=False):
     return _post("/fapi/v1/order", p)
 
 def stop_order(symbol, side, qty, stop_price):
+    """減倉型停損單（不用 closePosition：那種同方向只能掛一張，移動停損時沒辦法先掛新的再撤舊的）。回傳含 orderId。"""
     p = dict(symbol=symbol, side=side, type="STOP_MARKET", stopPrice=round_price(symbol, stop_price),
-             closePosition="true", workingType="MARK_PRICE")
-    if position_mode_hedge():
-        p["positionSide"] = "SHORT" if side == "BUY" else "LONG"
-        p.pop("closePosition"); p["quantity"] = round_qty(symbol, qty)
+             quantity=round_qty(symbol, qty), workingType="MARK_PRICE")
+    if position_mode_hedge(): p["positionSide"] = "SHORT" if side == "BUY" else "LONG"
+    else: p["reduceOnly"] = "true"
     return _post("/fapi/v1/order", p)
+
+def cancel_order(symbol, order_id):
+    return _post("/fapi/v1/order", dict(symbol=symbol, orderId=order_id), method="DELETE")

@@ -4,7 +4,7 @@ os.environ["TZ"] = os.environ.get("APP_TZ", "CST-8")   # 台灣 UTC+8、無夏�
 time.tzset()
 import base64, hmac, json, threading, traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params, presets
+import binance as B, config as C, risk, scanner, store, telegram, backtest, sweep, params, presets, manager
 from signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
@@ -36,8 +36,10 @@ def reconcile(force=False):
     for sym, rec in own.items():
         if sym in ex_syms: still[sym] = rec
         else:
-            rec = dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="交易所", **close_info(sym, rec)); store.push("closed", rec); changed = True
-            telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 已平倉（止損/追蹤觸發）")
+            rec = manager.record_close(sym, rec, "停損單"); changed = True
+            telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 停損單觸發出場" +
+                          (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
+                          (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else ""))
     if changed or len(still) != len(own): store.update(open=still)
     store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
                                 upnl=round(float(p.get("unRealizedProfit") or 0), 2),
@@ -66,13 +68,18 @@ def place(sym, eid, sig, sz, rec):
     rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
     own = dict(store.get().get("open", {}))
     own[sym] = dict(engine=eid, side=sig.side, time=rec["time"], ts=int(time.time() * 1000) - 5000,
-                    entry=sig.entry, fill=fill, stop=sig.stop, qty=qty, risk_usdt=sz.get("risk_usdt"))
+                    bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), r_unit=abs(sig.entry - sig.stop),
+                    entry=sig.entry, fill=fill, stop=sig.stop, qty=qty, risk_usdt=sz.get("risk_usdt"), state="初始")
     store.update(open=own, pending={})
     store.push("trades", rec)
 
     err = None                                  # 停損單：失敗重試一次
     for _ in range(2):
-        try: B.stop_order(sym, close_side, qty, sig.stop); err = None; break
+        try:
+            so = B.stop_order(sym, close_side, qty, sig.stop); err = None
+            own = dict(store.get().get("open", {}))
+            if sym in own: own[sym] = dict(own[sym], stop_id=so.get("orderId")); store.update(open=own)
+            break
         except Exception as e: err = str(e); time.sleep(1)
     if not err: return rec
     rec["stop_error"] = err
@@ -105,24 +112,25 @@ def loop():
                 last_scan = time.time()
                 store.update(watch=w, observe=o, last_scan=time.strftime("%Y-%m-%d %H:%M:%S"))
             if TRADE and C.API_KEY:
-                try: reconcile()
-                except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} reconcile {e}")
+                try: reconcile(force=True); manager.run()      # 先對帳（被停損掉的移除）再管理出場
+                except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} reconcile/出場管理 {e}")
             t0 = time.time()
             for s in list(watch):
               try:
-                k = B.klines(s, "5m", 150)      # 引擎最多回看 ~60 根，150 夠用且省一半傳輸
-                k1m = B.klines(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
+                k = manager.closed_bars(s, "5m", 150)      # 只用已收盤的棒，跟回測一致
+                k1m = manager.closed_bars(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
                 for eid in ENABLED:
                     kk = k1m if ENGINE_TF.get(eid) == "1m" else k
                     if not kk: continue
                     tag = f"{s}:{eid}"
                     if last.get(tag) == kk[-1]["t"]: continue     # 同一根不重複判斷
                     last[tag] = kk[-1]["t"]
+                    if manager.cooling(s, eid): continue           # 同引擎出場後冷卻（回測 cooldown_bars）
                     sig = ENGINES[eid](kk, len(kk) - 1)
                     if not sig: continue
                     sz = risk.size(sig)
                     if not sz: continue                      # 止損距離超過上限，略過
-                    rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False)
+                    rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False, bar_t=kk[-1]["t"])
                     if TRADE and C.API_KEY:
                         n_own, ex = reconcile(force=True)   # 要下單了，用最新的
                         mine = store.get().get("open", {})
@@ -149,23 +157,7 @@ def loop():
                 if took > POLL_SEC: telegram.send(msg)
         except Exception as e:
             store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
-        time.sleep(max(1, POLL_SEC - (time.time() - t0 if "t0" in dir() else 0)))
-
-def close_info(sym, rec, since_ms=None):
-    """從成交明細抓實際出場價、已實現損益、手續費。抓不到就回 {}。"""
-    try:
-        side = "SELL" if rec.get("side") == "LONG" else "BUY"
-        since = since_ms or rec.get("ts") or int((time.time() - 3 * 86400) * 1000)
-        tr = [t for t in B.user_trades(sym) if t["side"] == side and t["time"] >= since and float(t.get("realizedPnl") or 0) != 0]
-        if not tr: return {}
-        q = sum(float(t["qty"]) for t in tr)
-        px = sum(float(t["price"]) * float(t["qty"]) for t in tr) / q
-        pnl = sum(float(t["realizedPnl"]) for t in tr) - sum(float(t.get("commission") or 0) for t in tr)
-        out = dict(exit=float(f"{px:.6g}"), pnl=round(pnl, 2))
-        if rec.get("risk_usdt"): out["r"] = round(pnl / rec["risk_usdt"], 2)
-        return out
-    except Exception as e:
-        store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 抓出場價失敗 {e}"); return {}
+        time.sleep(POLL_SEC - time.time() % POLL_SEC + 2)     # 對齊整分後 2 秒：K 棒剛收完就判斷
 
 def _refresh():
     """手動動作後立刻重抓帳號持倉，畫面不用等下一輪迴圈。"""
@@ -180,26 +172,21 @@ def manage(act, sym, eid="?", stop=None):
     entry = float(pos["entryPrice"])
     own = dict(store.get().get("open", {}))
     if act == "close":
-        t0 = int(time.time() * 1000) - 5000
-        o = B.market_order(sym, "SELL" if is_long else "BUY", qty, reduce_only=True)
-        rec = own.pop(sym, None) or dict(engine=eid, side="LONG" if is_long else "SHORT", entry=entry, fill=entry, qty=qty)
-        px = float(o.get("avgPrice") or 0) or None
-        info = dict(exit=px, pnl=round((px - entry) * qty * (1 if is_long else -1), 2) if px else None)   # 先用回報價估
-        time.sleep(1); info.update({k: v for k, v in close_info(sym, rec, t0).items() if v is not None})    # 有成交明細就用實際值（含手續費）
-        store.update(open=own); store.push("closed", dict(rec, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="手動", **info))
+        rec = own.pop(sym, None) or dict(engine=eid, side="LONG" if is_long else "SHORT", entry=entry, fill=entry)
+        rec["qty"] = qty
+        store.update(open=own)
+        r = manager.close_now(sym, rec, "手動")
         _refresh()
-        msg = f"{sym} 已平倉" + (f" @ {info['exit']:.6g}，損益 {info['pnl']:+.2f} U" if info.get("exit") and info.get("pnl") is not None else "")
-        telegram.send(f"🏁 手動平倉 {msg}")
-        return dict(ok=True, msg=msg)
+        return dict(ok=True, msg=f"{sym} 已平倉" + (f" @ {r['exit']:.6g}，損益 {r['pnl']:+.2f} U" if r.get("exit") and r.get("pnl") is not None else ""))
     if act == "adopt":
         if not stop: return dict(error="請填停損價")
         stop = float(stop)
         if (is_long and stop >= entry) or (not is_long and stop <= entry):
             return dict(error=f"停損價方向不對（{'多' if is_long else '空'}單進場 {entry}）")
-        B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)
+        so = B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)
         own[sym] = dict(engine=eid, side="LONG" if is_long else "SHORT", time=time.strftime("%m-%d %H:%M"),
-                        ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty,
-                        risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True)
+                        ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty, r_unit=abs(entry - stop),
+                        risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), state="初始")
         store.update(open=own); _refresh()
         telegram.send(f"♻️ 手動認領 {sym} 引擎{eid}，已補掛停損 {stop}")
         return dict(ok=True, msg=f"{sym} 已認領並補掛停損 {stop}")
@@ -339,7 +326,7 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
    ${T(s.observe,wcols)}</div>
  <div class=card><h2>錯誤與警告</h2><div class=meta>${(s.errors||[]).slice(-8).reverse().join('<br>')||'（無）'}</div></div>`;
  const sig=s.signals.slice().reverse();
- $('t_open').innerHTML=`<div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','entry','fill','stop','qty','adopted'])}</div>`;
+ $('t_open').innerHTML=`<div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','fill','stop','qty','state','adopted'])}</div>`;
  const ex=s.exchange||[];
  $('t_ex').innerHTML=T(ex,['symbol','owner','amt','entry','upnl']);
  document.querySelectorAll('#t_ex tr').forEach((tr,i)=>{if(i&&ex[i-1]){tr.style.cursor='pointer';tr.onclick=()=>{$('mx').value=ex[i-1].symbol;$('mout').innerHTML=''}}});
