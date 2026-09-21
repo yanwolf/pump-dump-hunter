@@ -115,11 +115,34 @@ def user_trades(symbol, limit=50):
     return _get("/fapi/v1/userTrades", dict(symbol=symbol, limit=limit), signed=True)
 
 # ---- 下單（testnet / live 由 USE_TESTNET 決定）----
+_mode = dict(hedge=None, t=0)
+
 def position_mode_hedge():
-    return _get("/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"]
+    """單向／雙向持倉。快取 5 分鐘：原本每張單都打一次，白白多一次 API 又多一個失敗點。"""
+    if _mode["hedge"] is not None and time.time() - _mode["t"] < 300: return _mode["hedge"]
+    h = bool(_get("/fapi/v1/positionSide/dual", signed=True)["dualSidePosition"])
+    _mode.update(hedge=h, t=time.time()); return h
+
+def max_leverage(symbol):
+    """這個交易對帳戶能用的最高槓桿。新子帳戶常被限制在 5x，小幣分層本身也可能低於 10x。"""
+    try:
+        d = _get("/fapi/v1/leverageBracket", dict(symbol=symbol), signed=True)
+        rows = d if isinstance(d, list) else [d]
+        return max(int(x.get("initialLeverage") or 0) for x in rows[0].get("brackets") or []) or None
+    except Exception: return None
 
 def set_leverage(symbol, lev):
-    return _post("/fapi/v1/leverage", dict(symbol=symbol, leverage=int(lev)))
+    """回傳 (實際槓桿, 說明)。設不上就退到帳戶允許的最高值——沉默失敗會讓保證金與強平距離都跟預期不符。"""
+    try:
+        _post("/fapi/v1/leverage", dict(symbol=symbol, leverage=int(lev))); return int(lev), None
+    except Exception as e:
+        mx = max_leverage(symbol)
+        if mx and mx < lev:
+            try:
+                _post("/fapi/v1/leverage", dict(symbol=symbol, leverage=int(mx)))
+                return int(mx), f"該交易對上限 {mx}x，已改用 {mx}x（原設定 {lev}x）"
+            except Exception: pass
+        return None, f"設定槓桿失敗（{e}），沿用帳戶現有值"
 
 def market_order(symbol, side, qty, reduce_only=False):
     p = dict(symbol=symbol, side=side, type="MARKET", quantity=round_qty(symbol, qty), newOrderRespType="RESULT")   # RESULT 才有 avgPrice
@@ -129,13 +152,61 @@ def market_order(symbol, side, qty, reduce_only=False):
         p["reduceOnly"] = "true"
     return _post("/fapi/v1/order", p)
 
-def stop_order(symbol, side, qty, stop_price):
-    """減倉型停損單（不用 closePosition：那種同方向只能掛一張，移動停損時沒辦法先掛新的再撤舊的）。回傳含 orderId。"""
-    p = dict(symbol=symbol, side=side, type="STOP_MARKET", stopPrice=round_price(symbol, stop_price),
-             quantity=round_qty(symbol, qty), workingType="MARK_PRICE")
-    if position_mode_hedge(): p["positionSide"] = "SHORT" if side == "BUY" else "LONG"
-    else: p["reduceOnly"] = "true"
-    return _post("/fapi/v1/order", p)
+_algo_ok = [None]          # None=還不確定 True/False=已測知
 
-def cancel_order(symbol, order_id):
-    return _post("/fapi/v1/order", dict(symbol=symbol, orderId=order_id), method="DELETE")
+def stop_order(symbol, side, qty, stop_price):
+    """停損單。幣安 2025-12-09 起把條件單搬到 Algo 服務（舊端點回 -4120），
+    參數也改名：stopPrice → triggerPrice，並要帶 algoType=CONDITIONAL。
+    先打新端點，只有「端點不存在」才退回舊寫法，讓不同版本的正式網與模擬網都能運作。
+    回傳的 dict 會有 orderId（相容舊欄位）與 via（algo / legacy），撤單要靠 via 決定端點。"""
+    base = dict(symbol=symbol, side=side, type="STOP_MARKET",
+                quantity=round_qty(symbol, qty), workingType="MARK_PRICE")
+    if position_mode_hedge(): base["positionSide"] = "SHORT" if side == "BUY" else "LONG"
+    else: base["reduceOnly"] = "true"
+    px = round_price(symbol, stop_price)
+
+    if _algo_ok[0] is not False:
+        try:
+            o = _post("/fapi/v1/algoOrder", dict(base, algoType="CONDITIONAL", triggerPrice=px))
+            _algo_ok[0] = True
+            o["orderId"] = o.get("algoId"); o["via"] = "algo"
+            return o
+        except Exception as e:
+            msg = str(e)
+            # 參數錯不代表端點不存在；只有 404 / 未知端點才退回舊寫法
+            if not ("404" in msg or "-1013" in msg or "Unknown" in msg): raise
+            _algo_ok[0] = False
+    o = _post("/fapi/v1/order", dict(base, stopPrice=px))
+    o["via"] = "legacy"
+    return o
+
+def cancel_order(symbol, order_id, via=None):
+    """撤掉停損單。via 沒記錄時兩種端點都試一次。"""
+    errs = []
+    for kind in ([via] if via else ["algo", "legacy"]):
+        try:
+            if kind == "algo": return _post("/fapi/v1/algoOrder", dict(symbol=symbol, algoId=order_id), method="DELETE")
+            return _post("/fapi/v1/order", dict(symbol=symbol, orderId=order_id), method="DELETE")
+        except Exception as e: errs.append(f"{kind}: {e}")
+    raise RuntimeError("; ".join(errs))
+
+def order_type(o):
+    """Algo 端點欄位叫 orderType，舊端點叫 type。兩個都看。"""
+    return str(o.get("orderType") or o.get("type") or o.get("origType") or "").upper()
+
+def open_stops(symbol):
+    """這個幣掛著的條件單，回傳 (orders, ok)。
+    ok=False 代表查詢本身失敗——呼叫端絕對不能把「查不到」當成「不存在」，
+    這是 crypto-screener 誤平倉事件的根源。"""
+    paths = []
+    if _algo_ok[0] is not False: paths.append(("/fapi/v1/openAlgoOrders", dict(symbol=symbol, algoType="CONDITIONAL")))
+    if _algo_ok[0] is not True: paths.append(("/fapi/v1/openOrders", dict(symbol=symbol)))
+    out, ok = [], False
+    for path, params in paths:
+        try: d = _get(path, params, signed=True)
+        except Exception: continue
+        rows = d if isinstance(d, list) else (d.get("orders") if isinstance(d, dict) else None)
+        if rows is None: continue
+        ok = True
+        out += [o for o in rows if order_type(o) in ("STOP_MARKET", "STOP", "TRAILING_STOP_MARKET")]
+    return out, ok

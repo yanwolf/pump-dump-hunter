@@ -54,7 +54,15 @@ def place(sym, eid, sig, sz, rec):
     close_side = "SELL" if is_long else "BUY"
     store.update(pending={sym: dict(engine=eid, side=sig.side, time=rec["time"], entry=sig.entry, stop=sig.stop)})
     try:
-        B.set_leverage(sym, sz["leverage"])
+        lev, note = B.set_leverage(sym, sz["leverage"])
+        if note: store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} {note}")
+        if lev and lev != sz["leverage"]:                      # 槓桿被降 → 保證金會超出單筆上限，先縮量
+            cap = sz["usable"] / C.SIZING["max_positions"]
+            if sz["notional"] / lev > cap:
+                k = cap * lev / sz["notional"]
+                sz = dict(sz, qty=sz["qty"] * k, notional=round(sz["notional"] * k, 2),
+                          risk_usdt=round(sz["risk_usdt"] * k, 2))
+            sz = dict(sz, leverage=lev); rec.update(leverage=lev, qty=sz["qty"], notional=sz["notional"])
         o = B.market_order(sym, "BUY" if is_long else "SELL", sz["qty"])
     except Exception as e:
         store.update(pending={})
@@ -78,7 +86,7 @@ def place(sym, eid, sig, sz, rec):
         try:
             so = B.stop_order(sym, close_side, qty, sig.stop); err = None
             own = dict(store.get().get("open", {}))
-            if sym in own: own[sym] = dict(own[sym], stop_id=so.get("orderId")); store.update(open=own)
+            if sym in own: own[sym] = dict(own[sym], stop_id=so.get("orderId"), stop_via=so.get("via")); store.update(open=own)
             break
         except Exception as e: err = str(e); time.sleep(1)
     if not err: return rec
@@ -183,10 +191,10 @@ def manage(act, sym, eid="?", stop=None):
         stop = float(stop)
         if (is_long and stop >= entry) or (not is_long and stop <= entry):
             return dict(error=f"停損價方向不對（{'多' if is_long else '空'}單進場 {entry}）")
-        so = B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)
+        so = B.stop_order(sym, "SELL" if is_long else "BUY", qty, stop)   # via 一起記，撤單才知道打哪個端點
         own[sym] = dict(engine=eid, side="LONG" if is_long else "SHORT", time=time.strftime("%m-%d %H:%M"),
                         ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty, r_unit=abs(entry - stop),
-                        risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), state="初始")
+                        risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), stop_via=so.get("via"), state="初始")
         store.update(open=own); _refresh()
         telegram.send(f"♻️ 手動認領 {sym} 引擎{eid}，已補掛停損 {stop}")
         return dict(ok=True, msg=f"{sym} 已認領並補掛停損 {stop}")

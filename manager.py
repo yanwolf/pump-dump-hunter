@@ -45,7 +45,7 @@ def close_info(sym, pos, since_ms=None):
 def record_close(sym, pos, by, info=None):
     """持倉結束：撤掉殘留停損單（避免之後誤平到別的專案同幣的倉）、寫已平倉、記冷卻。"""
     if pos.get("stop_id"):
-        try: B.cancel_order(sym, pos["stop_id"])
+        try: B.cancel_order(sym, pos["stop_id"], pos.get("stop_via"))
         except Exception: pass                      # 已觸發或已撤銷
     info = close_info(sym, pos) if info is None else info
     rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **info)
@@ -72,11 +72,44 @@ def move_stop(sym, pos, new_stop, qty=None):
     is_long = pos["side"] == "LONG"
     qty = qty or pos["qty"]
     o = B.stop_order(sym, "SELL" if is_long else "BUY", qty, new_stop)
-    old = pos.get("stop_id")
+    old, old_via = pos.get("stop_id"), pos.get("stop_via")
     if old:
-        try: B.cancel_order(sym, old)
-        except Exception as e: _log(f"{sym} 撤舊停損失敗 {e}")
-    pos.update(stop=new_stop, stop_id=o.get("orderId"))
+        try: B.cancel_order(sym, old, old_via)
+        except Exception as e: _log(f"{sym} 撤舊停損失敗 {e}（下一輪 ensure_stop 會清掉殘留）")
+    pos.update(stop=new_stop, stop_id=o.get("orderId"), stop_via=o.get("via"))
+
+_missing = {}          # symbol → 連續幾輪確認停損不在
+
+def ensure_stop(sym, pos):
+    """確認停損單還掛著，不在就補掛。
+
+    設計原則直接沿用 crypto-screener 那次誤平倉的教訓：
+    1. 查詢失敗 ≠ 停損不在。查不到就跳過，下一輪再查。
+    2. 連續 3 輪都確認不在才動作，單次讀取錯誤不該觸發任何事。
+    3. 補掛被拒且原因是「已存在」→ 代表停損其實在，是判斷錯了，不動作。
+    4. 只補掛、不平倉。補不上就大聲告警，交給人決定。
+    """
+    stops, ok = B.open_stops(sym)
+    if not ok: return                                     # 原則 1
+    if stops:
+        _missing[sym] = 0
+        pos["stop_id"] = stops[0].get("algoId") or stops[0].get("orderId") or pos.get("stop_id")
+        for extra in stops[1:]:                           # 移動停損時舊單沒撤掉的殘留
+            try: B.cancel_order(sym, extra.get("algoId") or extra.get("orderId"), pos.get("stop_via"))
+            except Exception: pass
+        return
+    n = _missing.get(sym, 0) + 1; _missing[sym] = n
+    if n < 3: return                                      # 原則 2
+    try:
+        o = B.stop_order(sym, "SELL" if pos["side"] == "LONG" else "BUY", pos["qty"], pos["stop"])
+        pos["stop_id"] = o.get("orderId"); pos["stop_via"] = o.get("via"); _missing[sym] = 0
+        _log(f"{sym} 停損單不見了，已補掛 {pos['stop']}")
+        telegram.send(f"🔧 {sym} 引擎{pos.get('engine')} 停損單不見了，已補掛 {pos['stop']:.6g}")
+    except Exception as e:
+        msg = str(e).lower()
+        if "existing" in msg or "already" in msg:         # 原則 3
+            _missing[sym] = 0; _log(f"{sym} 停損其實在（補掛回報已存在），誤判"); return
+        telegram.send(f"🚨 {sym} 引擎{pos.get('engine')} 沒有停損單且補掛失敗（{e}）— 請手動處理")   # 原則 4
 
 def step(sym, pos):
     """處理這筆持倉自上次以來新收盤的 K 棒。回傳 "closed" 或 None（pos 會就地更新）。"""
@@ -124,7 +157,9 @@ def run():
     for sym in list(store.get().get("open", {})):
         pos = dict(store.get().get("open", {}).get(sym) or {})
         if not pos: continue
-        try: res = step(sym, pos)
+        try:
+            ensure_stop(sym, pos)
+            res = step(sym, pos)
         except Exception as e: _log(f"{sym} 出場管理 {e}"); continue
         own = dict(store.get().get("open", {}))
         if res == "closed": own.pop(sym, None)

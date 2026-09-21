@@ -44,6 +44,25 @@ E 在那個母體是 PF 2.07，換到無偏差的「暴漲日」母體只剩 0.8
 程式重啟或中途崩潰留下的無紀錄持倉，下一次對帳會從 pending 認領回來。
 交易分頁有「帳號全部持倉」對帳表，owner 欄分本策略／其他專案。
 
+## 跟 crypto-screener 學到的（別再踩）
+對過 crypto-screener v2 的 trader.py，把它用代價換來的四個設計搬過來：
+1. **查不到 ≠ 不存在**：`open_stops` 回傳 (orders, ok)。查詢失敗一律跳過，這是那邊誤平倉的根源。
+2. **連續 3 輪才動作**：停損確認不在要連 3 輪；補掛被拒且原因含 existing/already 視為誤判；
+   補不上只告警不平倉（強制平倉是那次事故的放大器）。
+3. **Algo 端點探測 + 退回**：先打新端點，只有 404／未知端點才退回舊寫法，參數錯不能誤判成端點不存在。
+   撤單要照 `via` 決定打哪個端點。
+4. **槓桿設不上要退而求其次**：新子帳戶常被限 5x、小幣分層也可能低於 10x。
+   設不上就退到 `leverageBracket` 的上限並縮量，沉默失敗會讓保證金與強平距離都跟預期不符。
+另外 hedge/oneway 模式改成快取 5 分鐘，原本每張單都打一次 API。
+
+## 停損單走 Algo 端點（2026-09-21）
+Binance 2025-12-09 起把條件單搬到 `/fapi/v1/algoOrder`，舊的 `/fapi/v1/order` 送 STOP_MARKET 會回
+`-4120 Order type not supported for this endpoint`。這就是 NIL 和 SAGA 兩次「停損掛不上」的真正原因。
+- 掛停損：POST `/fapi/v1/algoOrder`，`algoType=CONDITIONAL`、`triggerPrice`（不是 stopPrice）、回傳 `algoId`
+- 撤停損：DELETE `/fapi/v1/algoOrder`，帶 `algoId`
+- 查掛單：GET `/fapi/v1/openAlgoOrders`；每輪迴圈確認持倉的停損單還在，不在就自動補掛
+- 市價單仍走 `/fapi/v1/order`，沒變
+
 ## 實盤出場管理（2026-09-21 補上，之前完全沒有）
 之前實盤只掛初始停損單，回測的減碼／保本／追蹤／時間出場／冷卻全部沒做，實盤結果跟回測對不上。
 現在 `manager.py` 每輪迴圈逐根收盤棒重現 `backtest.simulate` 的出場規則：
