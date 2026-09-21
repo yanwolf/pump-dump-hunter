@@ -112,6 +112,15 @@ fake.open_stops = lambda s: (S["stops"], True); fake.user_trades = lambda s: []
 fake.round_qty = lambda s, q: f"{q:.0f}"
 fake.market_order = lambda *a, **k: {"avgPrice": "1"}
 fake.klines = lambda *a, **k: []
+# 守衛補掛前會逐幣確認部位（清單第 8 條 r18 的延伸）；模擬環境要能回報，否則守衛停在確認那步、走不到補掛（清單用法第 5 點 r17）
+S["pos_qty"] = 100
+fake.side_qty = lambda s, side: S["pos_qty"]
+S["placed"] = 0
+_orig_so = so
+def so(*a):
+    S["placed"] += 1
+    return _orig_so(*a)
+fake.stop_order = so
 
 def count_of(msg):
     import re
@@ -134,7 +143,9 @@ check("C12", "移損：由其他路徑移損成功也要發恢復通知", any("�
 # 補掛：失敗 1 次後，下一輪發現停損其實在（上次逾時但交易所端成功）→ 要發恢復
 tg.clear(); manager._missing.clear(); S["place_fail"] = 1; S["stops"] = []
 pos = dict(engine="C", side="LONG", qty=100, stop=0.9, entry=1.0, stop_id=5)
+S["placed"] = 0
 for _ in range(3): manager.ensure_stop("X", pos)      # 第 3 輪補掛失敗
+check("C12", "（前提）第 3 輪守衛真的送出了補掛（被拒）", S["placed"] == 1, f"補掛 {S['placed']} 次")
 S["stops"] = [dict(algoId=5, side="SELL", orderType="STOP_MARKET")]
 manager.ensure_stop("X", pos)                          # 停損其實在
 check("C12", "補掛：失敗後發現停損其實在 → 發恢復並清掉失敗次數",

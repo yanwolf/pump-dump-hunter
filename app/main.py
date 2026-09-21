@@ -103,8 +103,18 @@ def reconcile(force=False):
                           (f" @ {rec['exit']:.6g}，損益 {rec['pnl']:+.2f} U" if rec.get("exit") and rec.get("pnl") is not None else "") +
                           (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else ""))
     store.update(open=still, pending=pend)
+    def _mine_upnl(p):
+        """本策略那一列的未實現損益：自己的數量 ×（標記價 − 自己的成交價）。交易所那一列的
+        unRealizedProfit 照合併均價算、含同側別人的部位，不能直接當成自己的（清單第 3 條 r18）。"""
+        r = still.get(p["symbol"])
+        if not r or r.get("side") != B.side_of(p): return None
+        try: mark = float(p.get("markPrice") or 0)
+        except Exception: return None
+        if not mark: return None
+        return round(r["qty"] * (mark - (r.get("fill") or r["entry"])) * (1 if r["side"] == "LONG" else -1), 2)
     store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
-                                upnl=round(float(p.get("unRealizedProfit") or 0), 2),
+                                upnl=round(float(p.get("unRealizedProfit") or 0), 2), upnl_mine=_mine_upnl(p),
+                                base=(still.get(p["symbol"]) or {}).get("base_qty") or None,
                                 owner="本策略" if p["symbol"] in still and still[p["symbol"]].get("side") == B.side_of(p) else "其他")
                           for p in ex])
     _rc.update(t=time.time(), n=len(still) + len(pend), ex=ex)
@@ -211,63 +221,88 @@ def loop():
     telegram.send(f"🎯 pump-dump-hunter 啟動 engines={sorted(ENABLED)} trade={TRADE} testnet={C.USE_TESTNET}")
     try: preflight.run_and_report()          # 交易所 API 有沒有又改，開機就知道
     except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} 自檢失敗 {e}")
-    watch, last, last_scan = {}, {}, 0
+    state = dict(watch={}, last={}, last_scan=0)
     while True:
-        try:
-            if time.time() - last_scan > SCAN_SEC:
-                w, o = scanner.scan(verbose=False)
-                watch = {r["symbol"]: r for r in w}
-                last_scan = time.time()
-                store.update(watch=w, observe=o, last_scan=time.strftime("%Y-%m-%d %H:%M:%S"))
-            if TRADE and C.API_KEY:
-                try: reconcile(force=True); manager.run()      # 先對帳（被停損掉的移除）再管理出場
-                except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} reconcile/出場管理 {e}")
-            t0 = time.time()
-            for s in list(watch):
-              try:
-                k = manager.closed_bars(s, "5m", 150)      # 只用已收盤的棒，跟回測一致
-                k1m = manager.closed_bars(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
-                for eid in ENABLED:
-                    kk = k1m if ENGINE_TF.get(eid) == "1m" else k
-                    if not kk: continue
-                    tag = f"{s}:{eid}"
-                    if last.get(tag) == kk[-1]["t"]: continue     # 同一根不重複判斷
-                    last[tag] = kk[-1]["t"]
-                    if manager.cooling(s, eid): continue           # 同引擎出場後冷卻（回測 cooldown_bars）
-                    sig = ENGINES[eid](kk, len(kk) - 1)
-                    if not sig: continue
-                    sz = risk.size(sig)
-                    if not sz: continue                      # 止損距離超過上限，略過
-                    rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False, bar_t=kk[-1]["t"])
-                    if TRADE and C.API_KEY:
-                        n_own, ex = reconcile(force=True)   # 要下單了，用最新的
-                        mine = store.get().get("open", {})
-                        if s in mine:
-                            rec["skipped"] = f"本策略已持有此幣（引擎{mine[s].get('engine')}）"
-                        elif s in store.get().get("pending", {}):
-                            rec["skipped"] = "上一張單結果還沒確認（等對帳）"
-                        elif n_own >= C.SIZING["max_positions"]:
-                            rec["skipped"] = f"本策略持倉已 {n_own} 筆"
-                        elif any(p["symbol"] == s for p in ex):
-                            rec["skipped"] = "該幣帳號內已有倉（其他專案）"
-                        if rec.get("skipped"):
-                            store.push("signals", rec); telegram.send(f"⏸ 略過 {s} 引擎{eid}：{rec['skipped']}"); break
-                        rec = place(s, eid, sig, sz, rec)
-                    store.push("signals", rec)
-                    telegram.send(f"{'✅下單' if rec['executed'] else '👀訊號'} {s} 引擎{eid} {'多' if sig.side == 'LONG' else '空'} @{sig.entry:.5g} "
-                                  f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U" + (f" 成交{rec['fill']:.5g} 滑價{rec['slip_pct']}%" if rec.get("fill") else "") + f"\n{sig.reason}")
-                    break
-              except Exception as e:
-                store.push("errors", f"{time.strftime('%m-%d %H:%M')} {s} {e}"); traceback.print_exc()
-            took = round(time.time() - t0, 1)
-            store.update(loop=dict(took=took, symbols=len(watch), at=time.strftime("%H:%M:%S")))
-            if took > POLL_SEC * 0.7:
-                msg = f"⚠️ 引擎迴圈 {took}s / {len(watch)} 檔，接近輪詢間隔 {POLL_SEC}s，可能漏 K 線"
-                store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
-                if took > POLL_SEC: telegram.send(msg)
-        except Exception as e:
-            store.push("errors", f"{time.strftime('%m-%d %H:%M')} {e}"); traceback.print_exc()
+        tick(state)
         time.sleep(POLL_SEC - time.time() % POLL_SEC + 2)     # 對齊整分後 2 秒：K 棒剛收完就判斷
+
+_loop_errs = {}
+
+def _loop_step(name, fn):
+    """背景迴圈的一步。每一步各自 try：前面一步出錯，後面的對帳、守衛照樣跑（清單第 8 條 r18）。
+    出錯照節奏推播，不能只進錯誤區（第 14 條）；恢復時通知。"""
+    try:
+        r = fn()
+        n = _loop_errs.pop(name, 0)
+        if n >= 1: telegram.send(f"✅ 背景迴圈「{name}」已恢復（先前連續出錯 {n} 次）")
+        return r
+    except Exception as e:
+        n = _loop_errs[name] = _loop_errs.get(name, 0) + 1
+        store.push("errors", f"{time.strftime('%m-%d %H:%M')} {name}出錯（第 {n} 次）{type(e).__name__}: {e}")
+        traceback.print_exc()
+        if manager.nag(n):
+            telegram.send(f"🐞 背景迴圈「{name}」出錯（第 {n} 次）{type(e).__name__}: {str(e)[:120]}— 其他步驟照常執行")
+
+def _scan(state):
+    if time.time() - state["last_scan"] > SCAN_SEC:
+        w, o = scanner.scan(verbose=False)
+        state["watch"] = {r["symbol"]: r for r in w}
+        state["last_scan"] = time.time()
+        store.update(watch=w, observe=o, last_scan=time.strftime("%Y-%m-%d %H:%M:%S"))
+
+def tick(state):
+    """背景迴圈的一輪：掃描 → 對帳 → 出場管理與守衛 → 訊號與下單，四步各自 try。"""
+    _loop_step("掃描", lambda: _scan(state))
+    if TRADE and C.API_KEY:
+        _loop_step("對帳", lambda: reconcile(force=True))       # 先對帳（被停損掉的移除）
+        _loop_step("出場管理", manager.run)                       # 對帳出錯，守衛照樣跑
+    _loop_step("訊號", lambda: _signals(state))
+
+def _signals(state):
+    """掃描觀察名單、跑引擎、下單。每個幣各自 try（原本就是）。"""
+    t0 = time.time()
+    for s in list(state["watch"]):
+      try:
+        k = manager.closed_bars(s, "5m", 150)      # 只用已收盤的棒，跟回測一致
+        k1m = manager.closed_bars(s, "1m", 120) if any(ENGINE_TF.get(e) == "1m" for e in ENABLED) else None
+        for eid in ENABLED:
+            kk = k1m if ENGINE_TF.get(eid) == "1m" else k
+            if not kk: continue
+            tag = f"{s}:{eid}"
+            if state["last"].get(tag) == kk[-1]["t"]: continue     # 同一根不重複判斷
+            state["last"][tag] = kk[-1]["t"]
+            if manager.cooling(s, eid): continue           # 同引擎出場後冷卻（回測 cooldown_bars）
+            sig = ENGINES[eid](kk, len(kk) - 1)
+            if not sig: continue
+            sz = risk.size(sig)
+            if not sz: continue                      # 止損距離超過上限，略過
+            rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False, bar_t=kk[-1]["t"])
+            if TRADE and C.API_KEY:
+                n_own, ex = reconcile(force=True)   # 要下單了，用最新的
+                mine = store.get().get("open", {})
+                if s in mine:
+                    rec["skipped"] = f"本策略已持有此幣（引擎{mine[s].get('engine')}）"
+                elif s in store.get().get("pending", {}):
+                    rec["skipped"] = "上一張單結果還沒確認（等對帳）"
+                elif n_own >= C.SIZING["max_positions"]:
+                    rec["skipped"] = f"本策略持倉已 {n_own} 筆"
+                elif any(p["symbol"] == s for p in ex):
+                    rec["skipped"] = "該幣帳號內已有倉（其他專案）"
+                if rec.get("skipped"):
+                    store.push("signals", rec); telegram.send(f"⏸ 略過 {s} 引擎{eid}：{rec['skipped']}"); break
+                rec = place(s, eid, sig, sz, rec)
+            store.push("signals", rec)
+            telegram.send(f"{'✅下單' if rec['executed'] else '👀訊號'} {s} 引擎{eid} {'多' if sig.side == 'LONG' else '空'} @{sig.entry:.5g} "
+                          f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U" + (f" 成交{rec['fill']:.5g} 滑價{rec['slip_pct']}%" if rec.get("fill") else "") + f"\n{sig.reason}")
+            break
+      except Exception as e:
+        store.push("errors", f"{time.strftime('%m-%d %H:%M')} {s} {e}"); traceback.print_exc()
+    took = round(time.time() - t0, 1)
+    store.update(loop=dict(took=took, symbols=len(state["watch"]), at=time.strftime("%H:%M:%S")))
+    if took > POLL_SEC * 0.7:
+        msg = f"⚠️ 引擎迴圈 {took}s / {len(state["watch"])} 檔，接近輪詢間隔 {POLL_SEC}s，可能漏 K 線"
+        store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
+        if took > POLL_SEC: telegram.send(msg)
 
 def _refresh():
     """手動動作後立刻重抓帳號持倉，畫面不用等下一輪迴圈。"""

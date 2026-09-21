@@ -144,7 +144,9 @@ print("第 8 條 r14／r15：送平倉單那一刻交易所上有沒有停損")
 fx = fresh(); fx.open("XUSDT", "LONG", 100); so = own_pos(fx)
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("type") == "MARKET",
                       times=1, kind="http", code=400, body='{"code":-2019,"msg":"Margin is insufficient."}'))
+mark = len(fx.calls)
 r, e = run(lambda: main.manage("close", "XUSDT"))
+check("H6", "（前提）平倉單真的送出、被拒", len(market_closes(since(fx, mark))) >= 1)
 check("H6", "平倉被拒 → 停損仍在（撤停損在確認平掉之後）", so["stop_id"] in fx.algo_orders)
 
 seen = []

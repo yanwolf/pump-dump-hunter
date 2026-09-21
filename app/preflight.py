@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-09-21r16"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
+VERSION = "2026-09-21r19"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):
@@ -64,15 +64,22 @@ def check(trade=False):
     if pos is not None:
         try:
             keys = {(p["symbol"], B.side_of(p)) for p in pos}
-            orphan = []
+            orphan, unsure = [], []
             for o in B.all_open_stops():
                 protects = "LONG" if o.get("side") == "SELL" else "SHORT"
                 ps = o.get("positionSide")
                 if ps in ("LONG", "SHORT"): protects = ps
                 if (o.get("symbol"), protects) not in keys:
-                    orphan.append(f"{o.get('symbol')} {o.get('side')} {o.get('algoId') or o.get('orderId')}")
-            add("孤兒條件單", "warn" if orphan else "ok",
-                ("、".join(orphan[:8]) + (f" 等 {len(orphan)} 張" if len(orphan) > 8 else "")) if orphan else "沒有")
+                    # 全量表可能回空清單（清單第 2 條 r15、r18）：列成孤兒前逐幣確認；查不到就標「無法確認」
+                    try:
+                        has = any(B.side_of(p) == protects for p in B.position_rows(o.get("symbol")))
+                    except Exception: has = None
+                    tag = f"{o.get('symbol')} {o.get('side')} {o.get('algoId') or o.get('orderId')}"
+                    if has is None: unsure.append(tag)
+                    elif not has: orphan.append(tag)
+            msg = ("、".join(orphan[:8]) + (f" 等 {len(orphan)} 張" if len(orphan) > 8 else "")) if orphan else "沒有"
+            if unsure: msg += f"；無法確認 {len(unsure)} 張（逐幣查詢異常）：" + "、".join(unsure[:5])
+            add("孤兒條件單", "warn" if orphan or unsure else "ok", msg)
         except Exception as e: add("孤兒條件單", "warn", f"查詢失敗 {e}")
 
     return out

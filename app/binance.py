@@ -90,9 +90,16 @@ def open_positions():
     全量表裡找不到某個部位時，不能直接當成「平倉了」，要用 position_rows(symbol) 逐幣再查。"""
     return [p for p in _get("/fapi/v2/positionRisk", signed=True) if abs(float(p["positionAmt"])) > 0]
 
-def position_rows(symbol):
-    """單一幣的未平倉部位列（帶 symbol 查）。查詢失敗會拋例外，呼叫端不能當成「沒有」。"""
-    return [p for p in _get("/fapi/v2/positionRisk", dict(symbol=symbol), signed=True) if abs(float(p["positionAmt"])) > 0]
+def position_rows(symbol, include_zero=False):
+    """單一幣的部位列（帶 symbol 查）。
+    帶 symbol 查時交易所一定回這個幣的列（單向 1 列 BOTH、雙向 LONG/SHORT 2 列，數量 0 也回）。
+    回空清單、或回傳裡沒有這個幣的列 = 查詢異常 → 拋例外，**不能當成數量 0**（清單第 2 條 r17）。
+    include_zero=False 時只回有部位的列（呼叫端要的是「有哪些部位」時用）。"""
+    d = _get("/fapi/v2/positionRisk", dict(symbol=symbol), signed=True)
+    rows = [p for p in d if p.get("symbol") == symbol] if isinstance(d, list) else []
+    if not rows:
+        raise RuntimeError(f"positionRisk 逐幣查詢沒有回 {symbol} 的列（查詢異常，不能當成數量 0）")
+    return rows if include_zero else [p for p in rows if abs(float(p["positionAmt"])) > 0]
 
 def side_qty(symbol, side):
     """這個幣「這一側」在交易所上的總數量（含別人的，呼叫端要自己扣基準）。查詢失敗拋例外。"""

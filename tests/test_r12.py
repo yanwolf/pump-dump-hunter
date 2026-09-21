@@ -35,6 +35,11 @@ def since(fx, mark):
     """只算測試動作開始之後的呼叫（清單用法第 5 點第 7 種）。"""
     return fx.calls[mark:]
 
+def entry_sent(fx, mark):
+    """進場市價單（非 reduceOnly）真的送出去了——不管交易所回什麼。清單用法第 5 點 r17：每支會送單的測試都要有這條前提。"""
+    return any(c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET" and c[2].get("reduceOnly") != "true"
+               for c in fx.calls[mark:])
+
 def run(fn):
     try: return fn(), None
     except Exception as e: return None, e
@@ -71,7 +76,9 @@ print("第 3 條：進場單結果不明時保留 pending")
 fx = fresh()
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("type") == "MARKET",
                       times=1, kind="timeout", then_execute=True))
+mark = len(fx.calls)
 rec = main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=0))
+check("B1", "（前提）進場單真的送出了", entry_sent(fx, mark), f"skipped={rec.get('skipped')}")
 check("B1", "逾時（但其實成交）→ 不能當失敗清掉 pending", bool(store.get().get("pending")) or "XUSDT" in store.get().get("open", {}),
       f"pending={store.get().get('pending')} skipped={rec.get('skipped')}")
 check("B1", "逾時 → 通知不能寫「下單失敗」", not any("下單失敗" in m for m in TG), f"{TG}")
@@ -82,7 +89,9 @@ check("B1", "下一輪對帳認領回來", bool(own), f"open={store.get().get('o
 fx = fresh()
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("type") == "MARKET",
                       times=1, kind="http", code=503, body="Service Unavailable"))
+mark = len(fx.calls)
 main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=0))
+check("B1", "（前提）5xx 情境：進場單真的送出了", entry_sent(fx, mark))
 main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
 check("B1", "（前提）對帳真的跑完（第 8 種）", e is None and r is not None, f"err={e}")
 check("B1", "5xx（沒成交）→ 第一輪對帳沒看到部位時，pending 仍保留（交易所可能還沒反映）",
@@ -91,7 +100,9 @@ check("B1", "5xx（沒成交）→ 第一輪對帳沒看到部位時，pending �
 fx = fresh()
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("type") == "MARKET",
                       times=1, kind="http", code=400, body='{"code":-2019,"msg":"Margin is insufficient."}'))
+mark = len(fx.calls)
 rec = main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=0))
+check("B2", "（前提）進場單真的送出了（被拒是交易所的事）", entry_sent(fx, mark), f"skipped={rec.get('skipped')}")
 check("B2", "4xx 明確拒絕 → 可以清掉 pending、記下單失敗", not store.get().get("pending") and "下單失敗" in (rec.get("skipped") or ""))
 
 # =====================================================================
@@ -133,6 +144,7 @@ fx.open("XUSDT", "SHORT", 80); fx.open("XUSDT", "LONG", 50)
 mark = len(fx.calls)
 r, e = run(lambda: main.manage("close", "XUSDT"))
 mk = [c for c in since(fx, mark) if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
+check("C1", "（前提）手動平倉真的走到判斷，拒絕原因是「兩側都有」", isinstance(r, dict) and "兩側" in (r.get("error") or ""), f"回應={r}")
 check("C1", "手動平倉孤兒倉：雙向同幣兩側都有、帳上沒紀錄 → 分不出是哪一側，不能自己挑", not mk, f"回應={r}")
 
 # =====================================================================
@@ -143,8 +155,10 @@ def bad_push(k, v):
     if k == "trades": raise RuntimeError("disk full")
     return orig_push(k, v)
 store.push = bad_push
+mark = len(fx.calls)
 rec, e = run(lambda: main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=0)))
 store.push = orig_push
+check("D1", "（前提）進場單真的送出並成交", entry_sent(fx, mark) and fx.qty("XUSDT", "LONG") > 0)
 check("D1", "成交後記錄步驟丟例外 → place 不往外拋、回傳已成交", e is None and rec and rec.get("executed") is True, f"err={e}")
 check("D1", "成交後例外 → 部位仍在帳上、停損照掛",
       "XUSDT" in store.get().get("open", {}) and any(o["symbol"] == "XUSDT" for o in fx.algo_orders.values()))

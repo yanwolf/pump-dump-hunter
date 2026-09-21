@@ -18,10 +18,12 @@ tests/test_parity.py 回測 vs 實盤出場一致性測試（python -m tests.tes
 tests/test_lessons.py 清單 r6→r8 差異的行為測試（python -m tests.test_lessons）
 tests/test_r12.py     清單 r10→r12 差異的行為測試（python -m tests.test_r12）
 tests/test_r15.py     清單 r13→r15 差異的行為測試（python -m tests.test_r15）
+tests/test_r18.py     清單 r16→r18 差異的行為測試（python -m tests.test_r18）
+tests/mutation_check.py 突變檢查：逐幣查詢回空 → 基準查不到 → 不送單，找空跑的測試（python -m tests.mutation_check）
 tests/fake_exchange.py 模擬幣安（HTTP 層）：舊端點條件單 -4120、空單負數、雙向兩列、逐幣查部位、無 Algo 環境，
                       可注入逾時／5xx／200 空清單／成交但回應丟失
 scripts/patch.py      改程式用的字串取代：必須恰好命中 N 次，否則中止（清單第 14 條 r15）
-部署前兩支測試都要過，且 python -m pyflakes app/ 沒有 undefined name
+部署前：所有 tests.test_* 都要過、python -m tests.mutation_check 沒有空跑情境、python -m pyflakes app/ 沒有 undefined name
 BINANCE_LESSONS.md   三專案共用的踩坑清單
 ```
 

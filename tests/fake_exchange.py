@@ -7,9 +7,12 @@
 - 送錯模式參數 → -4061（帶/沒帶 positionSide 不符）或 -1106（雙向帶 reduceOnly）
 - positionRisk 帶 symbol 時只回那個幣；可注入「200 加空清單」
 - algo="404" 模擬沒有 Algo 服務的環境：Algo 端點全部 404、舊端點收條件單
+- positionRisk 帶 symbol 時，一定回這個幣的列（單向 1 列 BOTH、雙向 LONG/SHORT 2 列），數量 0 也回（清單第 2 條 r17）
+- 列上有 markPrice 與 unRealizedProfit（照這一列的合併均價算，含同側別人的部位）
+- 突變：環境變數 PDH_MUTATE=no_base → 逐幣查詢一律回空清單（清單用法第 5 點 r18：驗證前提斷言有沒有空跑）
 另外可以注入：逾時、5xx、指定錯誤碼、「成交了但回應丟失」。
 """
-import json, socket, time, urllib.error, urllib.parse, urllib.request
+import json, os, socket, time, urllib.error, urllib.parse, urllib.request
 
 
 class _Resp:
@@ -37,6 +40,7 @@ class FakeBinance:
         self.inject = []                 # [dict(path=, method=None, match=None, times=1, kind=, code=, body=, then_execute=False)]
         self.calls = []                  # (method, path, params)
         self.trades = []
+        self.mutate = os.environ.get("PDH_MUTATE", "")
 
     # ---------- 狀態輔助 ----------
     def open(self, symbol, side, qty, entry=None):
@@ -45,21 +49,26 @@ class FakeBinance:
     def qty(self, symbol, side):
         return self.pos.get((symbol, side), [0, 0])[0]
 
-    def rows(self):
+    def _row(self, s, ps, amt, entry):
+        upnl = (self.price - entry) * amt if amt else 0.0          # amt 帶正負號
+        return dict(symbol=s, positionSide=ps, positionAmt=str(amt), entryPrice=str(entry if amt else 0),
+                    markPrice=str(self.price), unRealizedProfit=str(round(upnl, 8)))
+
+    def rows(self, symbol=None):
+        """全量表：只列有部位的（程式本來就會濾掉 0）。逐幣：一定回這個幣的列，數量 0 也回。"""
         out = []
-        syms = sorted({s for s, _ in self.pos})
+        syms = [symbol] if symbol else sorted({s for s, _ in self.pos})
         for s in syms:
             L, S = self.qty(s, "LONG"), self.qty(s, "SHORT")
             if self.hedge:
                 for side, q in (("LONG", L), ("SHORT", S)):
-                    if q: out.append(dict(symbol=s, positionSide=side, positionAmt=str(q if side == "LONG" else -q),
-                                          entryPrice=str(self.pos[(s, side)][1]), unRealizedProfit="0"))
+                    if q or symbol:
+                        out.append(self._row(s, side, q if side == "LONG" else -q, self.pos.get((s, side), [0, 0])[1]))
             else:
                 net = L - S
-                if net:
+                if net or symbol:
                     side = "LONG" if net > 0 else "SHORT"
-                    out.append(dict(symbol=s, positionSide="BOTH", positionAmt=str(net),
-                                    entryPrice=str(self.pos[(s, side)][1]), unRealizedProfit="0"))
+                    out.append(self._row(s, "BOTH", net, self.pos.get((s, side), [0, 0])[1]))
         return out
 
     # ---------- 安裝 ----------
@@ -95,7 +104,10 @@ class FakeBinance:
     def _route(self, url, path, method, p):
         if path == "/fapi/v1/positionSide/dual": return {"dualSidePosition": self.hedge}
         if path == "/fapi/v2/positionRisk":
-            return [r for r in self.rows() if "symbol" not in p or r["symbol"] == p["symbol"]]
+            if "symbol" in p:
+                if self.mutate == "no_base": return []                 # 突變：逐幣查詢回空清單
+                return self.rows(p["symbol"])
+            return self.rows()
         if path == "/fapi/v1/exchangeInfo":
             return {"symbols": [dict(symbol=s, filters=[
                 dict(filterType="LOT_SIZE", stepSize="1", minQty="1"),

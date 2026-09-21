@@ -48,7 +48,7 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
 <div id=trade class=pane style=display:none>
   <div id=t_open></div>
   <div class=card><h2>帳號全部持倉 · 對帳用</h2>
-    <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）。點表格中的一列會自動帶入下方欄位。
+    <div class=meta style=margin-bottom:8px>owner=其他 表示不是這支機器人開的（crypto-screener／黃金等）。upnl 是交易所整列的損益（含同側別人的部位）；upnl_mine 是本策略自己的數量算出來的，base 是送單前同側就有的數量。點表格中的一列會自動帶入下方欄位。
       確定是本策略漏記的孤兒倉，可以認領回來（會補掛停損）或直接平掉。自動刷新不會清掉你填的內容。</div>
     <div class=row>
       <select id=mx style="flex:1;min-width:120px"><option value="">— 選幣 —</option></select>
@@ -134,7 +134,7 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
  const sig=s.signals.slice().reverse();
  $('t_open').innerHTML=`<div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','fill','stop','qty','state','adopted'])}</div>`;
  const ex=s.exchange||[];
- $('t_ex').innerHTML=T(ex,['symbol','owner','amt','entry','upnl']);
+ $('t_ex').innerHTML=T(ex,['symbol','owner','amt','entry','upnl','upnl_mine','base']);
  document.querySelectorAll('#t_ex tr').forEach((tr,i)=>{if(i&&ex[i-1]){tr.style.cursor='pointer';tr.onclick=()=>{$('mx').value=ex[i-1].symbol;$('mout').innerHTML=''}}});
  const cur=$('mx').value;   // 保留使用者目前的選擇
  $('mx').innerHTML='<option value="">— 選幣 —</option>'+ex.map(p=>`<option value="${p.symbol}">${p.symbol}（${p.owner}·${p.amt>0?'多':'空'}）</option>`).join('')+
