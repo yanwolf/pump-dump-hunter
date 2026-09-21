@@ -86,8 +86,17 @@ def wallet_balance(asset="USDT"):
     return 0.0
 
 def open_positions():
-    """目前未平倉的 (symbol, positionSide) 數。"""
+    """全帳號未平倉的部位列。注意：維護或閘門異常時可能回 200 加空清單（清單第 2 條 r15）——
+    全量表裡找不到某個部位時，不能直接當成「平倉了」，要用 position_rows(symbol) 逐幣再查。"""
     return [p for p in _get("/fapi/v2/positionRisk", signed=True) if abs(float(p["positionAmt"])) > 0]
+
+def position_rows(symbol):
+    """單一幣的未平倉部位列（帶 symbol 查）。查詢失敗會拋例外，呼叫端不能當成「沒有」。"""
+    return [p for p in _get("/fapi/v2/positionRisk", dict(symbol=symbol), signed=True) if abs(float(p["positionAmt"])) > 0]
+
+def side_qty(symbol, side):
+    """這個幣「這一側」在交易所上的總數量（含別人的，呼叫端要自己扣基準）。查詢失敗拋例外。"""
+    return sum(abs(float(p["positionAmt"])) for p in position_rows(symbol) if side_of(p) == side)
 
 # ---- 交易所精度（下單一定要照 stepSize / tickSize，否則 -1111）----
 _F = {}
@@ -276,7 +285,12 @@ def open_stops(symbol):
     for path, params in (("/fapi/v1/openAlgoOrders", dict(symbol=symbol, algoType="CONDITIONAL")),
                          ("/fapi/v1/openOrders", dict(symbol=symbol))):
         try: d = _get(path, params, signed=True)
-        except Exception: continue
+        except Exception as e:
+            # 查詢也回 404 = Algo 端點不存在 → 跟掛單一樣暫時改走舊端點，改用舊端點的查詢結果判斷（清單第 1 條 r15）。
+            # 只靠掛單時設定的話，服務重啟後還沒掛過新停損，守衛會每輪「查詢失敗、跳過」，永遠不檢查。
+            if path.startswith("/fapi/v1/openAlgo") and _is_404(e):
+                _algo["legacy_until"] = max(_algo["legacy_until"], time.time() + LEGACY_RETRY_SEC)
+            continue
         rows = d if isinstance(d, list) else (d.get("orders") if isinstance(d, dict) else None)
         if rows is None: continue
         if path.startswith("/fapi/v1/openAlgo"): ok_algo = True

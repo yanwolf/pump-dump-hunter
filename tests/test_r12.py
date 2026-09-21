@@ -31,6 +31,10 @@ def fresh(hedge=False, algo="ok"):
     TG.clear()
     return fx
 
+def since(fx, mark):
+    """只算測試動作開始之後的呼叫（清單用法第 5 點第 7 種）。"""
+    return fx.calls[mark:]
+
 def run(fn):
     try: return fn(), None
     except Exception as e: return None, e
@@ -79,7 +83,8 @@ fx = fresh()
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("type") == "MARKET",
                       times=1, kind="http", code=503, body="Service Unavailable"))
 main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=0))
-main._rc["t"] = 0; main.reconcile(force=True)
+main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
+check("B1", "（前提）對帳真的跑完（第 8 種）", e is None and r is not None, f"err={e}")
 check("B1", "5xx（沒成交）→ 第一輪對帳沒看到部位時，pending 仍保留（交易所可能還沒反映）",
       bool(store.get().get("pending")), f"pending={store.get().get('pending')}")
 
@@ -108,21 +113,26 @@ check("C2", "認領後 3 輪內停損一定在交易所上", any(o["symbol"] == 
 fx = fresh(hedge=True)
 fx.open("XUSDT", "SHORT", 80)                                  # 別的專案的反向倉
 store.update(pending={"XUSDT": dict(engine="C", side="LONG", time="t", entry=1.0, stop=0.9, ts=int(time.time()*1000))})
-main._rc["t"] = 0; main.reconcile(force=True)
+main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
+check("C2", "（前提）對帳真的跑完，交易所那列 SHORT 有被讀到（第 8 種）",
+      e is None and any(x["symbol"] == "XUSDT" and x["amt"] < 0 for x in store.get().get("exchange", [])), f"err={e}")
 check("C2", "雙向：只有別人的 SHORT → 不能認領成自己的 LONG", "XUSDT" not in store.get().get("open", {}))
 
 fx = fresh(hedge=True)
 fx.open("XUSDT", "SHORT", 80)
 store.update(open={"XUSDT": dict(engine="C", side="LONG", qty=100, entry=1.0, stop=0.9)})
+mark = len(fx.calls)
 r, e = run(lambda: main.manage("close", "XUSDT"))
-mk = [c for c in fx.calls if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
-check("C1", "手動平倉：自己的 LONG 已不在、只剩別人的 SHORT → 根本不送平倉單、回錯誤",
-      not mk and isinstance(r, dict) and r.get("error"), f"回應={r} 送出的市價單={len(mk)}")
+mk = [c for c in since(fx, mark) if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
+check("C1", "手動平倉：自己的 LONG 已不在、只剩別人的 SHORT → 根本不送平倉單、回錯誤（原因是「這一側沒有自己的部位」）",
+      not mk and isinstance(r, dict) and "沒有" in (r.get("error") or "") and "部位" in (r.get("error") or ""),
+      f"回應={r} 送出的市價單={len(mk)}")
 check("C1", "手動平倉：自己的 LONG 已不在 → 帳上紀錄不能被移除（交給對帳處理）", "XUSDT" in store.get().get("open", {}))
 fx = fresh(hedge=True)
 fx.open("XUSDT", "SHORT", 80); fx.open("XUSDT", "LONG", 50)
+mark = len(fx.calls)
 r, e = run(lambda: main.manage("close", "XUSDT"))
-mk = [c for c in fx.calls if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
+mk = [c for c in since(fx, mark) if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
 check("C1", "手動平倉孤兒倉：雙向同幣兩側都有、帳上沒紀錄 → 分不出是哪一側，不能自己挑", not mk, f"回應={r}")
 
 # =====================================================================
@@ -151,7 +161,10 @@ def setup_open(fx, side="LONG", qty=100):
 fx = fresh(); so = setup_open(fx)
 fx.inject.append(dict(path="/fapi/v1/order", method="POST", match=lambda p: p.get("reduceOnly") == "true",
                       times=5, kind="http", code=400, body='{"code":-2019,"msg":"Margin is insufficient."}'))
+mark = len(fx.calls)
 r, e = run(lambda: main.manage("close", "XUSDT"))
+check("F1", "（前提）平倉單真的送出了（第 8 種：沒送也會「停損沒撤、沒記平倉」）",
+      any(c[1] == "/fapi/v1/order" and c[2].get("reduceOnly") == "true" for c in since(fx, mark)))
 check("F1", "手動平倉被拒 → 部位仍在帳上", "XUSDT" in store.get().get("open", {}), f"回應={r}")
 check("F1", "手動平倉被拒 → 停損沒被撤", so["orderId"] in fx.algo_orders)
 check("F1", "手動平倉被拒 → 不記成已平倉", not store.get().get("closed"))
@@ -180,6 +193,7 @@ manager.B.klines = lambda *a, **k: list(bars)
 manager._now = lambda: 10**15
 for i in range(6): manager.run()                 # 第 1 輪時間出場被拒；之後每輪由 retry_close 重試
 n_alert = len([m for m in TG if "XUSDT" in m])
+check("F1", "時間出場告警的原因是注入的 -2019（第 6 種）", n_alert and all("-2019" in m for m in TG if "XUSDT" in m), f"{TG[:2]}")
 check("F1", "時間出場平倉一直被拒 → 依節奏告警（6 輪只發第 1、5 次，共 2 則）", n_alert == 2, f"告警 {n_alert} 則")
 check("F1", "時間出場平倉被拒 → 部位留在帳上", "XUSDT" in store.get().get("open", {}))
 
@@ -199,6 +213,13 @@ manager.record_close("XUSDT", pos, "停損單", info={})
 check("E3", "失敗中部位被平掉 → 發收尾通知（移損／補掛失敗狀態隨平倉結束）",
       any("隨平倉結束" in m or "收尾" in m for m in TG), f"{TG}")
 check("E4", "平倉後補掛連續次數歸零，同幣下次進場不會接著數", not manager._missing.get("XUSDT"))
+fx = fresh(); setup_open(fx)
+p = dict(store.get()["open"]["XUSDT"]); p.update(want_stop=1.0, want_fail=3, guard_fail=2); store.update(open={"XUSDT": p})
+manager._missing["XUSDT"] = 2
+fx.pos.clear()                                                 # 交易所上部位沒了（停損觸發）
+main._rc["t"] = 0; main.reconcile(force=True)                  # 第 9 種：走完整對帳，不單獨呼叫 record_close
+check("E3", "完整對帳發現平倉 → 收尾通知", any("隨平倉結束" in m for m in TG), f"{TG}")
+check("E4", "完整對帳發現平倉 → 補掛次數歸零", not manager._missing.get("XUSDT"))
 
 # =====================================================================
 print("第 8 條：交易所端數量減少（本專案沒有交易所停利單；手動在 App 減碼也會造成）")

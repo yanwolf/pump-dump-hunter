@@ -71,13 +71,13 @@ def record_close(sym, pos, by, info=None):
 class CloseFailed(Exception):
     """平倉沒完成；close_now 已計數並依節奏告警，部位與停損都保留。"""
 
-def remaining(sym, side):
-    """交易所上這一側還剩多少數量。查詢失敗回 None——不能當成 0（清單第 2 條）。"""
-    try: rows = B.open_positions()
+def remaining(sym, side, base=0.0):
+    """交易所上「自己的」這一側還剩多少：這一側總數扣掉送單前就有的基準數量（清單第 3 條 r14、第 7 條 r15）。
+    - 帶 symbol 逐幣查，不用全量表：全量表可能回 200 加空清單（清單第 2 條 r15）。
+    - 查詢失敗回 None——不能當成 0（清單第 2 條）。"""
+    try: total = B.side_qty(sym, side)
     except Exception: return None
-    for p in rows:
-        if p["symbol"] == sym and B.side_of(p) == side: return abs(float(p["positionAmt"]))
-    return 0.0
+    return max(0.0, round(total - (base or 0.0), 10))
 
 def close_now(sym, pos, by):
     """市價平掉剩餘部位並記帳。平倉單送出後一定看結果（清單第 8 條 r12）：
@@ -85,16 +85,24 @@ def close_now(sym, pos, by):
     - 還有剩（數量不符被拒、部分成交）→ 用交易所實際數量重送一次。
     - 還是沒平掉 → 保留部位與停損、依節奏告警、拋 CloseFailed；呼叫端每輪會再試（want_close）。"""
     side = pos["side"]; close_side = "SELL" if side == "LONG" else "BUY"
-    qty, px, err, left = pos["qty"], None, None, None
+    base = pos.get("base_qty") or 0.0
+    px, err = None, None
+    # 送單前先確認自己還有多少（清單第 7 條 r15）：扣掉基準後沒有了就不送——
+    # 單向共用帳號裡同側有別人的部位時，reduceOnly 單會把別人的平掉。數量取「交易所這一側 − 基準」與帳上的小者。
+    left = remaining(sym, side, base)
+    if left is None: qty = None
+    elif left == 0: qty = 0
+    else: qty = min(pos["qty"], left)
     for attempt in (1, 2):
+        if not qty: break                            # 查不到（None）或自己已經沒了（0）→ 不送單
         try:
             o = B.market_order(sym, close_side, qty, reduce_only=True)
             px = float(o.get("avgPrice") or 0) or px
         except Exception as e: err = e
         time.sleep(0.5)                              # 讓交易所的部位表跟上
-        left = remaining(sym, side)
+        left = remaining(sym, side, base)
         if left is None or left == 0: break
-        if attempt == 1 and left != qty: qty = left; continue   # 帳上數量跟交易所不符 → 用實際數量重送
+        if attempt == 1 and left != qty: qty = min(left, pos["qty"]); continue   # 部分成交或帳實不符 → 用自己的實際剩餘重送
         if attempt == 1 and err is not None and not B.definite_reject(err): continue   # 逾時／5xx 且數量沒變 → 再送一次
         break
     if left != 0:
@@ -210,6 +218,9 @@ def ensure_stop(sym, pos):
                       (f"（先前失敗 {was} 次，已恢復）" if was else ""))
     except Exception as e:
         msg = str(e).lower()
+        if "-2021" in msg:                                # 價格已穿過停損：停損本來就該觸發了 → 直接出場
+            try: close_now(sym, pos, "停損"); return "closed"
+            except CloseFailed: return None
         if "existing" in msg or "already" in msg:         # 原則 3
             _missing[sym] = 0; _log(f"{sym} 停損其實在（補掛回報已存在），誤判")
             was = pos.pop("guard_fail", 0)
@@ -303,8 +314,8 @@ def run():
             if res == "pending": res = None
             elif res != "closed": res = retry_stop(sym, pos)
             if res != "closed":
-                ensure_stop(sym, pos)                    # 等平倉期間停損也要一直在
-                if not pos.get("want_close"): res = step(sym, pos)
+                res = ensure_stop(sym, pos)              # 等平倉期間停損也要一直在；補掛遇 -2021 會直接出場
+                if res != "closed" and not pos.get("want_close"): res = step(sym, pos)
         except Exception as e: _log(f"{sym} 出場管理 {e}"); continue
         own = dict(store.get().get("open", {}))
         if res == "closed": own.pop(sym, None)

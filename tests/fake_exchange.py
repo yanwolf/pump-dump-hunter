@@ -5,6 +5,8 @@
 - 單向模式：每個幣只有一列 BOTH，空單 positionAmt 是負數
 - 雙向模式：LONG / SHORT 兩列，SHORT 的 positionAmt 是負數；平倉超量被拒
 - 送錯模式參數 → -4061（帶/沒帶 positionSide 不符）或 -1106（雙向帶 reduceOnly）
+- positionRisk 帶 symbol 時只回那個幣；可注入「200 加空清單」
+- algo="404" 模擬沒有 Algo 服務的環境：Algo 端點全部 404、舊端點收條件單
 另外可以注入：逾時、5xx、指定錯誤碼、「成交了但回應丟失」。
 """
 import json, socket, time, urllib.error, urllib.parse, urllib.request
@@ -30,6 +32,7 @@ class FakeBinance:
         self.price = price
         self.pos = {}                    # (symbol, "LONG"/"SHORT") -> [qty>0, entry]
         self.algo_orders = {}            # algoId -> dict
+        self.legacy_orders = {}          # orderId -> dict（只有 algo="404" 的環境才收）
         self.next_id = 1000
         self.inject = []                 # [dict(path=, method=None, match=None, times=1, kind=, code=, body=, then_execute=False)]
         self.calls = []                  # (method, path, params)
@@ -83,6 +86,7 @@ class FakeBinance:
             if rule.get("then_execute"):                       # 交易所端執行了，但回應在路上丟了
                 self._route(url, path, method, params)
             if rule["kind"] == "timeout": raise socket.timeout("timed out")
+            if rule["kind"] == "empty": return _Resp([])      # 200 加空清單（維護、閘門異常，清單第 2 條 r15）
             self._err(url, rule["code"], rule.get("body", ""))
 
         return _Resp(self._route(url, path, method, params))
@@ -90,7 +94,8 @@ class FakeBinance:
     # ---------- 路由 ----------
     def _route(self, url, path, method, p):
         if path == "/fapi/v1/positionSide/dual": return {"dualSidePosition": self.hedge}
-        if path == "/fapi/v2/positionRisk": return self.rows()
+        if path == "/fapi/v2/positionRisk":
+            return [r for r in self.rows() if "symbol" not in p or r["symbol"] == p["symbol"]]
         if path == "/fapi/v1/exchangeInfo":
             return {"symbols": [dict(symbol=s, filters=[
                 dict(filterType="LOT_SIZE", stepSize="1", minQty="1"),
@@ -99,8 +104,10 @@ class FakeBinance:
         if path == "/fapi/v1/leverage": return {"leverage": int(p.get("leverage", 1))}
         if path == "/fapi/v1/userTrades": return [t for t in self.trades if t["symbol"] == p.get("symbol")]
         if path == "/fapi/v1/openAlgoOrders":
+            if self.algo == "404": self._err(url, 404, "Not Found")
             return [o for o in self.algo_orders.values() if o["symbol"] == p.get("symbol", o["symbol"])]
-        if path == "/fapi/v1/openOrders": return []
+        if path == "/fapi/v1/openOrders":
+            return [dict(o) for o in self.legacy_orders.values() if o["symbol"] == p.get("symbol", o["symbol"])]
         if path == "/fapi/v1/algoOrder":
             if self.algo == "404": self._err(url, 404, "Not Found")
             if method == "DELETE":
@@ -114,9 +121,19 @@ class FakeBinance:
             self.algo_orders[self.next_id] = o
             return dict(o)
         if path == "/fapi/v1/order":
-            if method == "DELETE": self._err(url, 400, '{"code":-2011,"msg":"Unknown order sent."}')
+            if method == "DELETE":
+                oid = int(p.get("orderId", 0))
+                if oid not in self.legacy_orders: self._err(url, 400, '{"code":-2011,"msg":"Unknown order sent."}')
+                return self.legacy_orders.pop(oid)
             if p.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT", "TRAILING_STOP_MARKET"):
-                self._err(url, 400, '{"code":-4120,"msg":"Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."}')
+                if self.algo != "404":      # 真實幣安：條件單只收 Algo 端點
+                    self._err(url, 400, '{"code":-4120,"msg":"Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."}')
+                self._check_mode(url, p, reduce=True)          # 模擬「沒有 Algo 服務的環境」：舊端點收條件單
+                self.next_id += 1
+                o = dict(orderId=self.next_id, symbol=p["symbol"], side=p["side"], type=p["type"],
+                         stopPrice=p.get("stopPrice"), origQty=p.get("quantity"), positionSide=p.get("positionSide", "BOTH"))
+                self.legacy_orders[self.next_id] = o
+                return dict(o)
             return self._market(url, p)
         return {}
 

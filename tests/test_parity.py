@@ -21,6 +21,9 @@ fake.open_positions=lambda: ([dict(symbol="X", positionSide="BOTH", entryPrice="
                                    positionAmt=str(S["pos_qty"] if S.get("side","LONG")=="LONG" else -S["pos_qty"]))]
                              if S["pos_qty"] > 1e-9 else [])
 fake.side_of=lambda p: "LONG" if float(p["positionAmt"]) > 0 else "SHORT"
+# 平倉確認改成逐幣查詢並扣基準（清單第 2、7 條 r15），模擬環境跟著補
+fake.position_rows=lambda sym: fake.open_positions()
+fake.side_qty=lambda sym, side: sum(abs(float(p["positionAmt"])) for p in fake.open_positions() if fake.side_of(p) == side)
 fake.cancel_order=lambda s,i,v=None: S["stops"].pop(i,None)
 from app import store, manager, backtest, signals
 manager._now = lambda: S["now"]
