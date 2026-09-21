@@ -23,6 +23,9 @@ def _get(path, params=None, base=None, signed=False):
     url = f"{base}{path}?{urllib.parse.urlencode(params)}"
     return _open(urllib.request.Request(url, headers=headers))
 
+def _mode_err(e):
+    return "-4061" in str(e) or "-1106" in str(e)
+
 def _post(path, params, method="POST"):
     params["timestamp"] = int(time.time() * 1000)
     q = urllib.parse.urlencode(params)
@@ -144,13 +147,29 @@ def set_leverage(symbol, lev):
             except Exception: pass
         return None, f"設定槓桿失敗（{e}），沿用帳戶現有值"
 
+def _mode_fields(p, side, reduce_only):
+    """雙向模式要帶 positionSide 且不能帶 reduceOnly；單向相反。"""
+    p.pop("positionSide", None); p.pop("reduceOnly", None)
+    if position_mode_hedge(): p["positionSide"] = "SHORT" if (side == "SELL") != reduce_only else "LONG"
+    elif reduce_only: p["reduceOnly"] = "true"
+    return p
+
+def _send_mode_safe(path, p, side, reduce_only):
+    """共用帳號的持倉模式可能被別的專案切掉（快取還是舊的）→ 回 -4061/-1106 時重偵測、重送一次。"""
+    try: return _post(path, _mode_fields(dict(p), side, reduce_only))
+    except Exception as e:
+        if not _mode_err(e): raise
+        _mode.update(hedge=None, t=0)
+        return _post(path, _mode_fields(dict(p), side, reduce_only))
+
 def market_order(symbol, side, qty, reduce_only=False):
     p = dict(symbol=symbol, side=side, type="MARKET", quantity=round_qty(symbol, qty), newOrderRespType="RESULT")   # RESULT 才有 avgPrice
-    if position_mode_hedge():
-        p["positionSide"] = "SHORT" if (side == "SELL") != reduce_only else "LONG"
-    elif reduce_only:
-        p["reduceOnly"] = "true"
-    return _post("/fapi/v1/order", p)
+    return _send_mode_safe("/fapi/v1/order", p, side, reduce_only)
+
+def side_of(p):
+    """positionRisk 一筆的方向。雙向模式看 positionSide，單向看數量正負。"""
+    ps = p.get("positionSide", "BOTH")
+    return ps if ps in ("LONG", "SHORT") else ("LONG" if float(p["positionAmt"]) > 0 else "SHORT")
 
 _algo_ok = [None]          # None=還不確定 True/False=已測知
 
@@ -161,13 +180,11 @@ def stop_order(symbol, side, qty, stop_price):
     回傳的 dict 會有 orderId（相容舊欄位）與 via（algo / legacy），撤單要靠 via 決定端點。"""
     base = dict(symbol=symbol, side=side, type="STOP_MARKET",
                 quantity=round_qty(symbol, qty), workingType="MARK_PRICE")
-    if position_mode_hedge(): base["positionSide"] = "SHORT" if side == "BUY" else "LONG"
-    else: base["reduceOnly"] = "true"
     px = round_price(symbol, stop_price)
 
     if _algo_ok[0] is not False:
         try:
-            o = _post("/fapi/v1/algoOrder", dict(base, algoType="CONDITIONAL", triggerPrice=px))
+            o = _send_mode_safe("/fapi/v1/algoOrder", dict(base, algoType="CONDITIONAL", triggerPrice=px), side, True)
             _algo_ok[0] = True
             o["orderId"] = o.get("algoId"); o["via"] = "algo"
             return o
@@ -176,19 +193,35 @@ def stop_order(symbol, side, qty, stop_price):
             # 參數錯不代表端點不存在；只有 404 / 未知端點才退回舊寫法
             if not ("404" in msg or "-1013" in msg or "Unknown" in msg): raise
             _algo_ok[0] = False
-    o = _post("/fapi/v1/order", dict(base, stopPrice=px))
+    o = _send_mode_safe("/fapi/v1/order", dict(base, stopPrice=px), side, True)
     o["via"] = "legacy"
     return o
 
+def gone(e):
+    """撤單回『查無此單』= 已觸發或已撤，不是錯誤。"""
+    s = str(e); return "-2011" in s or "Unknown order" in s or "-2013" in s
+
 def cancel_order(symbol, order_id, via=None):
-    """撤掉停損單。via 沒記錄時兩種端點都試一次。"""
+    """撤掉停損單。via 沒記錄時兩種端點都試一次。已不存在（-2011）回傳 None、不拋錯。"""
     errs = []
     for kind in ([via] if via else ["algo", "legacy"]):
         try:
             if kind == "algo": return _post("/fapi/v1/algoOrder", dict(symbol=symbol, algoId=order_id), method="DELETE")
             return _post("/fapi/v1/order", dict(symbol=symbol, orderId=order_id), method="DELETE")
-        except Exception as e: errs.append(f"{kind}: {e}")
+        except Exception as e:
+            if gone(e): return None
+            errs.append(f"{kind}: {e}")
     raise RuntimeError("; ".join(errs))
+
+def all_open_stops():
+    """全帳號的條件單（不帶 symbol，權重 40）。只給自檢用，不要放進迴圈。"""
+    rows = []
+    for path, params in (("/fapi/v1/openAlgoOrders", dict(algoType="CONDITIONAL")), ("/fapi/v1/openOrders", {})):
+        if path.startswith("/fapi/v1/openAlgo") and _algo_ok[0] is False: continue
+        if path == "/fapi/v1/openOrders" and _algo_ok[0] is True: continue
+        d = _get(path, params, signed=True)
+        rows += d if isinstance(d, list) else (d.get("orders") or [])
+    return [o for o in rows if order_type(o) in ("STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT", "TRAILING_STOP_MARKET")]
 
 def order_type(o):
     """Algo 端點欄位叫 orderType，舊端點叫 type。兩個都看。"""

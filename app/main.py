@@ -24,18 +24,19 @@ def reconcile(force=False):
     own, pend = st.get("open", {}), dict(st.get("pending", {}))
     if not C.API_KEY: return 0, []
     ex = B.open_positions()
+    ex_keys = {(p["symbol"], B.side_of(p)) for p in ex}      # 雙向模式下同幣可能有兩側，只認自己那一側（清單第 7 條）
     ex_syms = {p["symbol"] for p in ex}
     if pend:                                   # pending = 送出市價單前先寫的紀錄
         own = dict(own)
         for sym, rec in pend.items():
-            if sym in ex_syms and sym not in own:
+            if (sym, rec.get("side")) in ex_keys and sym not in own:
                 own[sym] = dict(rec, adopted=True)
                 store.push("errors", f"{time.strftime('%m-%d %H:%M')} 認領無紀錄持倉 {sym}（引擎{rec.get('engine')}）")
                 telegram.send(f"♻️ 認領 {sym} 引擎{rec.get('engine')}：下單後紀錄遺失，已補記帳。請確認停損單是否存在")
         store.update(open=own, pending={})
     still, changed = {}, False
     for sym, rec in own.items():
-        if sym in ex_syms: still[sym] = rec
+        if (sym, rec.get("side")) in ex_keys: still[sym] = rec
         else:
             rec = manager.record_close(sym, rec, "停損單"); changed = True
             telegram.send(f"🏁 {sym} 引擎{rec.get('engine')} 停損單觸發出場" +
@@ -44,7 +45,8 @@ def reconcile(force=False):
     if changed or len(still) != len(own): store.update(open=still)
     store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
                                 upnl=round(float(p.get("unRealizedProfit") or 0), 2),
-                                owner="本策略" if p["symbol"] in still else "其他") for p in ex])
+                                owner="本策略" if p["symbol"] in still and still[p["symbol"]].get("side") == B.side_of(p) else "其他")
+                          for p in ex])
     _rc.update(t=time.time(), n=len(still), ex=ex)
     return len(still), ex
 
@@ -76,16 +78,19 @@ def place(sym, eid, sig, sz, rec):
     rec["executed"] = True; rec["fill"] = fill; rec["qty"] = qty
     rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
     own = dict(store.get().get("open", {}))
+    try: stop_px = float(B.round_price(sym, sig.stop))       # 實際掛出去的停損價（照 tickSize）
+    except Exception: stop_px = sig.stop
     own[sym] = dict(engine=eid, side=sig.side, time=rec["time"], ts=int(time.time() * 1000) - 5000,
-                    bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), r_unit=abs(sig.entry - sig.stop),
-                    entry=sig.entry, fill=fill, stop=sig.stop, qty=qty, risk_usdt=sz.get("risk_usdt"), state="初始")
+                    bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), r_unit=abs(sig.entry - stop_px),   # R 用取整後的停損算（清單第 4 條）
+                    entry=sig.entry, fill=fill, stop=stop_px, qty=qty,
+                    risk_usdt=round(abs(sig.entry - stop_px) * qty, 4), state="初始")
     store.update(open=own, pending={})
     store.push("trades", rec)
 
     err = None                                  # 停損單：失敗重試一次
     for _ in range(2):
         try:
-            so = B.stop_order(sym, close_side, qty, sig.stop); err = None
+            so = B.stop_order(sym, close_side, qty, stop_px); err = None
             own = dict(store.get().get("open", {}))
             if sym in own: own[sym] = dict(own[sym], stop_id=so.get("orderId"), stop_via=so.get("via")); store.update(open=own)
             break
@@ -177,7 +182,9 @@ def _refresh():
 
 def manage(act, sym, eid="?", stop=None):
     """手動處理帳號裡的孤兒倉（修正前留下的、或別的原因沒記到帳的）。"""
-    pos = next((p for p in B.open_positions() if p["symbol"] == sym), None)
+    mine = store.get().get("open", {}).get(sym)
+    cands = [p for p in B.open_positions() if p["symbol"] == sym]
+    pos = next((p for p in cands if mine and B.side_of(p) == mine.get("side")), cands[0] if cands else None)
     if not pos: return dict(error=f"{sym} 帳號內沒有持倉")
     amt = float(pos["positionAmt"]); is_long = amt > 0; qty = abs(amt)
     entry = float(pos["entryPrice"])
@@ -283,8 +290,7 @@ class H(BaseHTTPRequestHandler):
             except Exception as e: res = dict(error=str(e))
             body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/preflight"):
-            body, ct = json.dumps(dict(results=preflight.check(), version=preflight.VERSION),
-                                  ensure_ascii=False).encode(), "application/json; charset=utf-8"
+            body, ct = json.dumps(preflight.check_throttled(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/params"):
             body, ct = json.dumps(params.schema(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep/clear"):

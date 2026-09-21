@@ -44,9 +44,12 @@ def close_info(sym, pos, since_ms=None):
 
 def record_close(sym, pos, by, info=None):
     """持倉結束：撤掉殘留停損單（避免之後誤平到別的專案同幣的倉）、寫已平倉、記冷卻。"""
-    if pos.get("stop_id"):
-        try: B.cancel_order(sym, pos["stop_id"], pos.get("stop_via"))
-        except Exception: pass                      # 已觸發或已撤銷
+    for oid, via in [(pos.get("stop_id"), pos.get("stop_via"))] + [tuple(x) for x in pos.get("stale_ids", [])]:
+        if not oid: continue
+        try: B.cancel_order(sym, oid, via)          # 已觸發／已撤（-2011）在 cancel_order 裡視為正常
+        except Exception as e:
+            _log(f"{sym} 平倉後撤殘留停損失敗 {e}")
+            telegram.send(f"⚠️ {sym} 已平倉，但停損單 {oid} 撤不掉（{e}）— 請到交易所手動撤，避免動到同幣的其他倉")
     info = close_info(sym, pos) if info is None else info
     rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **info)
     store.push("closed", rec)
@@ -71,12 +74,29 @@ def move_stop(sym, pos, new_stop, qty=None):
     """先掛新停損、再撤舊的，中間不會有沒保護的空窗。"""
     is_long = pos["side"] == "LONG"
     qty = qty or pos["qty"]
+    pos["want_stop"] = new_stop                     # 先記意圖：掛不上時下一輪 retry_stop 會重試
     o = B.stop_order(sym, "SELL" if is_long else "BUY", qty, new_stop)
     old, old_via = pos.get("stop_id"), pos.get("stop_via")
     if old:
         try: B.cancel_order(sym, old, old_via)
-        except Exception as e: _log(f"{sym} 撤舊停損失敗 {e}（下一輪 ensure_stop 會清掉殘留）")
-    pos.update(stop=new_stop, stop_id=o.get("orderId"), stop_via=o.get("via"))
+        except Exception as e:
+            pos.setdefault("stale_ids", []).append([old, old_via])   # 記下來，平倉時一起撤
+            _log(f"{sym} 撤舊停損失敗 {e}（已記錄，下一輪或平倉時再撤）")
+    pos.update(stop=new_stop, stop_id=o.get("orderId"), stop_via=o.get("via"), want_stop=None, want_fail=0)
+
+def retry_stop(sym, pos):
+    """上次移損沒成功（例如新單被拒）→ 每輪重試。crypto-screener 曾因此『移損到成本』安靜失效好幾天。"""
+    want = pos.get("want_stop")
+    if want is None or want == pos.get("stop"): pos["want_stop"] = None; return
+    try:
+        move_stop(sym, pos, want)
+        telegram.send(f"✅ {sym} 移動停損補上了：{want:.6g}")
+    except Exception as e:
+        if "-2021" in str(e):                       # 價格已穿過想要的停損 = 本來就該出場
+            close_now(sym, pos, "停損"); return "closed"
+        n = pos["want_fail"] = pos.get("want_fail", 0) + 1
+        if n in (1, 5, 30) or n % 120 == 0:        # 別每分鐘洗版，但要一直提醒
+            telegram.send(f"🚨 {sym} 停損應移到 {want:.6g} 仍未成功（第 {n} 次，{e}）— 目前停損還在 {pos.get('stop'):.6g}")
 
 _missing = {}          # symbol → 連續幾輪確認停損不在
 
@@ -91,12 +111,21 @@ def ensure_stop(sym, pos):
     """
     stops, ok = B.open_stops(sym)
     if not ok: return                                     # 原則 1
-    if stops:
+    oid = lambda o: o.get("algoId") or o.get("orderId")
+    close_side = "SELL" if pos["side"] == "LONG" else "BUY"
+    mine_ids = {pos.get("stop_id")} | {x[0] for x in pos.get("stale_ids", [])}
+    # 只認自己記過 id 的單；沒記 id（舊版認領的倉）才退而用方向判斷。共用帳號裡同幣的別人單不能碰（清單第 7 條）
+    mine = [o for o in stops if oid(o) in mine_ids] or \
+           ([o for o in stops if o.get("side") == close_side][:1] if not pos.get("stop_id") else [])
+    if mine:
         _missing[sym] = 0
-        pos["stop_id"] = stops[0].get("algoId") or stops[0].get("orderId") or pos.get("stop_id")
-        for extra in stops[1:]:                           # 移動停損時舊單沒撤掉的殘留
-            try: B.cancel_order(sym, extra.get("algoId") or extra.get("orderId"), pos.get("stop_via"))
+        cur = next((o for o in mine if oid(o) == pos.get("stop_id")), mine[0])
+        pos["stop_id"] = oid(cur)
+        for extra in mine:                                # 只撤自己記錄在案的殘留
+            if oid(extra) == pos["stop_id"]: continue
+            try: B.cancel_order(sym, oid(extra), pos.get("stop_via")); _log(f"{sym} 撤掉殘留停損 {oid(extra)}")
             except Exception: pass
+        pos["stale_ids"] = [x for x in pos.get("stale_ids", []) if x[0] != pos["stop_id"] and x[0] in {oid(o) for o in stops}]
         return
     n = _missing.get(sym, 0) + 1; _missing[sym] = n
     if n < 3: return                                      # 原則 2
@@ -158,8 +187,10 @@ def run():
         pos = dict(store.get().get("open", {}).get(sym) or {})
         if not pos: continue
         try:
-            ensure_stop(sym, pos)
-            res = step(sym, pos)
+            res = retry_stop(sym, pos)
+            if res != "closed":
+                ensure_stop(sym, pos)
+                res = step(sym, pos)
         except Exception as e: _log(f"{sym} 出場管理 {e}"); continue
         own = dict(store.get().get("open", {}))
         if res == "closed": own.pop(sym, None)

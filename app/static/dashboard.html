@@ -205,6 +205,6 @@ async function mpos(act){const o=$('mout');const sym=$('mx').value;if(!sym){o.in
 async function pf(){const o=$('pfout');o.innerHTML='檢查中…';
  const r=await (await F('/api/preflight')).json();
  if(r.error){o.innerHTML='<span style=color:var(--down)>'+r.error+'</span>';return}
- o.innerHTML=r.results.map(x=>`${x.status=='ok'?'✅':x.status=='warn'?'⚠️':'❌'} ${x.item}　<span class=meta>${x.msg||''}</span>`).join('<br>')}
+ o.innerHTML=r.results.map(x=>`${x.status=='ok'?'✅':x.status=='warn'?'⚠️':'❌'} ${x.item}　<span class=meta>${x.msg||''}</span>`).join('<br>')+(r.cached?`<br><span class=meta>（${r.age} 秒前的結果；自檢會打高權重查詢，60 秒內不重跑）</span>`:'')}
 async function sigclear(){if(!confirm('清除「訊號」和「已平倉」紀錄？（已下單紀錄保留）'))return;await F('/api/signals/clear');load()}
 load();swload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>

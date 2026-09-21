@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-09-21"        # 三個專案共用；複製過去時連同這行一起帶
+VERSION = "2026-09-21r3"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):
@@ -53,13 +53,39 @@ def check(trade=False):
     except Exception as e: add("槓桿上限", "warn", e)
 
     # 5. 速率限制：positionRisk 權重高，打太兇會 418
+    pos = None
     try:
-        t0 = time.time(); B.open_positions()
+        t0 = time.time(); pos = B.open_positions()
         add("查持倉", "ok", f"{(time.time() - t0) * 1000:.0f} ms")
     except Exception as e:
         add("查持倉", "fail", f"{e}（418 = 被限流，檢查輪詢頻率）")
 
+    # 6. 孤兒條件單（清單第 13 條）：掛著但帳號裡沒有對應部位的。只列出、不自動撤——共用帳號，可能是別的專案的
+    if pos is not None:
+        try:
+            keys = {(p["symbol"], B.side_of(p)) for p in pos}
+            orphan = []
+            for o in B.all_open_stops():
+                protects = "LONG" if o.get("side") == "SELL" else "SHORT"
+                ps = o.get("positionSide")
+                if ps in ("LONG", "SHORT"): protects = ps
+                if (o.get("symbol"), protects) not in keys:
+                    orphan.append(f"{o.get('symbol')} {o.get('side')} {o.get('algoId') or o.get('orderId')}")
+            add("孤兒條件單", "warn" if orphan else "ok",
+                ("、".join(orphan[:8]) + (f" 等 {len(orphan)} 張" if len(orphan) > 8 else "")) if orphan else "沒有")
+        except Exception as e: add("孤兒條件單", "warn", f"查詢失敗 {e}")
+
     return out
+
+
+_last = dict(t=0, res=None)
+
+def check_throttled(cooldown=60):
+    """網頁按鈕用：自檢會打權重 40 的全帳號查詢，60 秒內重複按直接回上次結果（清單第 6 條延伸）。"""
+    if _last["res"] is not None and time.time() - _last["t"] < cooldown:
+        return dict(results=_last["res"], version=VERSION, cached=True, age=int(time.time() - _last["t"]))
+    _last.update(t=time.time(), res=check())
+    return dict(results=_last["res"], version=VERSION, cached=False)
 
 
 def run_and_report(send=True):
