@@ -15,7 +15,10 @@ _load_fail = dict(n=0, backed_up=False)
 def _read_file():
     """回傳 (ok, 資料或錯誤)。「讀取失敗」與「沒有資料」不能是同一個回傳值（清單第 8 條 r38）：
     檔案不存在 = 第一次啟動，ok、空資料；檔案在但讀不了、解析不了、格式不對 = 失敗。"""
-    if not os.path.exists(_path): return True, {}
+    if not os.path.exists(_path):
+        # 讀取失敗期間原檔不見了（被搬走、改名）：仍是失敗。照開機的規則當成全新開始，就恢復開新倉、帳是空的——假恢復（r43）
+        if _load_fail["n"]: return False, FileNotFoundError("讀取失敗期間原檔不見了；確定要全新開始請放一份內容為 {} 的檔")
+        return True, {}
     try:
         with open(_path, encoding="utf-8") as f: d = json.load(f)
         if not isinstance(d, dict): raise ValueError("最外層不是物件")

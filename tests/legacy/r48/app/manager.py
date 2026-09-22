@@ -177,7 +177,10 @@ def close_now(sym, pos, by):
         if not qty: break                            # 查不到（None）或自己已經沒了（0）→ 不送單
         try:
             o = B.market_order(sym, close_side, qty, reduce_only=True)
-            px = float(o.get("avgPrice") or 0) or px
+            f = B.confirm_fill(sym, o)                           # 卡在 NEW 的單會被撤掉，不跟下一次的平倉單重疊（r43）
+            if f["executed"] > 0: px = f["avg"] or px
+            if 0 < f["executed"] < qty - 1e-9 or (f["executed"] > 0 and pos.get("close_partial") is None and attempt > 1):
+                pos["close_partial"] = True                      # 部分成交過：出場價要兩段加權，不能只用最後一張單（r43，跟著部位存檔）
         except Exception as e: err = e
         time.sleep(0.5)                              # 讓交易所的部位表跟上
         left = remaining(sym, side, base)
@@ -198,6 +201,7 @@ def close_now(sym, pos, by):
     was = pos.pop("close_fail", 0); pos.pop("want_close", None)
     # 交易所上已經平掉了——從這裡開始不能丟例外（清單第 8 條 r24）：算損益只用 .get()，缺欄位記為未知
     entry, q = num(pos.get("fill")), num(pos.get("qty"))   # 估算只用實際成交價；查不到就記未知，交給成交明細（r27）
+    if pos.get("close_partial"): px = None                  # 平倉分好幾段成交過：最後一張單的均價只代表後半段，估算不能用它（r43）
     parts = [num((x or {}).get("pnl")) for x in pos.get("partials", [])]
     try:
         # 任何一段損益未知 → 整筆未知（不能把未知那段當 0 加總，清單第 8 條 r27）
@@ -363,7 +367,11 @@ def step(sym, pos):
             if R["tp1_r"] is not None and not pos.get("tp1") and r_now >= R["tp1_r"]:
                 half = float(B.round_qty(sym, pos["qty"] / 2))
                 o = B.market_order(sym, "SELL" if d > 0 else "BUY", half, reduce_only=True)
-                done = num(float(o.get("executedQty") or 0)) or half
+                f = B.confirm_fill(sym, o)                      # 成交 0 不能照樣把帳上數量減半（清單第 15 條）
+                done = f["executed"]
+                if not f["known"] or done <= 0:
+                    # 沒成交或查不到：帳不動。之後真的成交了，對帳會從部位減少偵測到、記成部分出場
+                    _log(f"{sym} 1R 減碼單沒有確認成交（{f['status']}，成交 {done}），帳上數量不變"); continue
                 pos["qty"] = round(pos["qty"] - done, 8); pos["tp1"] = True; pos["state"] = "已減碼"
                 try: adopt_partial(sym, pos, done)            # 1R 減碼也是一段出場：損益用實際成交（清單第 8 條 r30）
                 except Exception as e: _log(f"{sym} 記 1R 減碼損益失敗 {e}")
@@ -426,6 +434,19 @@ def sweep_leftovers():
 
 _errs = {}               # (symbol, 步驟) → 連續出錯次數
 
+# 引擎鎖（清單第 8 條 r45 的執行緒版，r47）：對帳、出場管理、下單、網頁交易操作都要先拿到它才能動帳本。
+# 這些步驟一開始拿一份帳本副本、中間查交易所好幾秒、最後整份寫回；兩條執行緒交錯時，後寫的會把先寫的清掉——
+# 對帳期間手動平倉，已結帳的部位被寫回、同一筆結兩次帳；出場管理期間手動平倉失敗，「待平倉」被清掉。
+# 鎖加在函式本身（裝飾器），不是加在某一個呼叫端——不管誰呼叫都擋得到。可重入：同一條執行緒巢狀呼叫不會卡住。
+import functools, threading
+ENGINE_LOCK = threading.RLock()
+
+def engine_locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with ENGINE_LOCK: return fn(*a, **k)
+    return wrapper
+
 def _step_err(sym, stage, e):
     """守衛迴圈裡某個部位的某一步出錯：記錄並照節奏推播（清單第 8 條 r18、第 14 條：不能只進錯誤區）。"""
     k = (sym, stage); n = _errs[k] = _errs.get(k, 0) + 1
@@ -438,6 +459,7 @@ def _step_ok(sym, stage):
     n = _errs.pop((sym, stage), 0)
     if n >= 1: telegram.send(f"✅ {sym} {stage}已恢復（先前連續出錯 {n} 次）")
 
+@engine_locked
 def run():
     """每輪迴圈呼叫一次（在 reconcile 之後，已被交易所停損掉的倉不會進來）。"""
     try: sweep_leftovers(); _step_ok("*", "重撤殘留單")

@@ -107,15 +107,40 @@ def schema():
         out.append(dict(s, default=cur))
     return out
 
-def to_overrides(form):
-    """{"ENGINE_A.hot_gain": 0.5, "EXIT.A.cooldown_bars": 0} -> config 覆蓋 dict；只含與預設不同的。"""
-    o = {}
-    for k, v in form.items():
+def validate(form):
+    """整批驗證（清單第 8 條 r41）：欄位名稱與值都驗，回傳 (覆蓋 dict, 錯誤清單)。有任何錯誤時呼叫端整批不套用。
+    以前是一邊迴圈一邊轉：名稱打錯被 except 接住、沿用上一個欄位的型別塞進設定；值打錯整批失敗，但表單已經先存了。"""
+    import math
+    o, errs = {}, []
+    for k, v in (form or {}).items():
         if v is None or v == "": continue
-        try: cur = _get(k); v = type(cur)(v) if cur is not None and not isinstance(cur, bool) else float(v)
-        except Exception: v = float(v)
-        if cur == v: continue
+        try: cur = _get(k)
+        except (KeyError, AttributeError, TypeError, IndexError):
+            errs.append(f"{k}：沒有這個參數"); continue
+        try:
+            if isinstance(cur, bool):
+                s = str(v).strip().lower()
+                if s in ("true", "1", "on", "yes"): nv = True
+                elif s in ("false", "0", "off", "no"): nv = False
+                else: raise ValueError("不是 true／false")
+            elif isinstance(cur, int):
+                fv = float(v)
+                if not fv.is_integer(): raise ValueError("應該是整數")
+                nv = int(fv)
+            else:
+                nv = float(v)
+                if not math.isfinite(nv): raise ValueError("不是有限的數字")
+        except (TypeError, ValueError) as e:
+            errs.append(f"{k}={v!r}：{e}"); continue
+        if cur == nv: continue
         parts = k.split(".")
-        if parts[0] == "EXIT": o.setdefault("EXIT", {}).setdefault(parts[1], {})[parts[2]] = v
-        else: o.setdefault(parts[0], {})[parts[1]] = v
+        if parts[0] == "EXIT": o.setdefault("EXIT", {}).setdefault(parts[1], {})[parts[2]] = nv
+        else: o.setdefault(parts[0], {})[parts[1]] = nv
+    return o, errs
+
+def to_overrides(form):
+    """{"ENGINE_A.hot_gain": 0.5, "EXIT.A.cooldown_bars": 0} -> config 覆蓋 dict；只含與預設不同的。有不合法的欄位就拋錯（整批不套用）。"""
+    o, errs = validate(form)
+    if errs: raise ValueError("參數不合法：" + "；".join(errs))
     return o
+

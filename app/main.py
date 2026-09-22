@@ -160,6 +160,15 @@ def place(sym, eid, sig, sz, rec):
         # 持倉紀錄還沒載入：開倉函式本身就擋（自動、手動都經過這裡，清單第 8 條 r38、r39）
         rec["skipped"] = "持倉紀錄還沒載入（狀態檔讀取失敗），暫停開新倉"
         return rec
+    # 拿到引擎鎖之後再檢查一次同一檔的狀態（清單第 8 條 r50：鎖只讓兩張單排隊，不會讓第二張不送）。
+    # 呼叫端在拿鎖之前也檢查過，但那時看到的可能是舊的——另一條剛好在開同一檔，等它做完、這條拿到鎖，那個判斷已經過期。
+    _own, _pend = store.get().get("open", {}), store.get().get("pending", {})
+    if sym in _own:
+        rec["skipped"] = f"這檔已有部位（引擎{_own[sym].get('engine')}），不重複開倉"; return rec
+    if sym in _pend:
+        rec["skipped"] = f"這檔已有一筆正在等確認的單（引擎{_pend[sym].get('engine')}），不重複開倉"; return rec
+    if len(_own) + len(_pend) >= C.SIZING["max_positions"]:
+        rec["skipped"] = f"本策略持倉已 {len(_own) + len(_pend)} 筆（含等確認），達上限"; return rec
     is_long = sig.side == "LONG"
     try: stop_px = float(B.round_price(sym, sig.stop))       # 實際掛出去的停損價（照 tickSize，第 4 條）
     except Exception: stop_px = sig.stop
