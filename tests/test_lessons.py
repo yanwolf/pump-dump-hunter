@@ -110,6 +110,7 @@ def cancel(s, i, v=None):
 fake.stop_order = so; fake.cancel_order = cancel
 fake.open_stops = lambda s: (S["stops"], True); fake.user_trades = lambda s: []
 fake.round_qty = lambda s, q: f"{q:.0f}"
+fake.cap_market_qty = lambda s, q: (q, False, None)        # 市價單數量上限（這支測試不涉及）
 fake.market_order = lambda *a, **k: {"avgPrice": "1", "executedQty": str(a[2]), "status": "FILLED"}
 # 成交確認（清單第 15 條，r43 新增）：簡化模擬照回應裡的成交量
 fake.confirm_fill = lambda s, o: dict(executed=float(o.get("executedQty") or 0), avg=float(o.get("avgPrice") or 0) or None,

@@ -6,6 +6,7 @@ from app import config as C; C.API_KEY="x"
 fake=types.ModuleType("binance"); sys.modules["app.binance"]=fake
 S=dict(bars=[], now=0, pos_qty=0, orders=[], stops={}, sid=0)
 fake.round_qty=lambda s,q: f"{q:.0f}"
+fake.cap_market_qty=lambda s,q: (q, False, None)          # 市價單數量上限（這支測試不涉及）
 def klines(sym, tf, limit): return [b for b in S["bars"] if b["t"] <= S["now"]][-limit:]
 fake.klines=klines
 def mo(sym, side, qty, reduce_only=False):

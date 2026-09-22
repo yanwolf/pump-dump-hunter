@@ -29,6 +29,7 @@ tests/test_r39.py     清單 r37→r39 差異的行為測試（python -m tests.t
 tests/test_r43.py     清單 r40→r43 差異的行為測試（python -m tests.test_r43）
 tests/test_r47.py     清單 r44→r47 差異的行為測試（python -m tests.test_r47）
 tests/test_r50.py     清單 r48→r50 差異的行為測試（python -m tests.test_r50）
+tests/test_maxqty.py  交易所市價單數量上限（-4005，2026-09-22 SKRUSDT 實單）：開倉壓到上限、平倉分批
 tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版）；python -m tests.rerun_old legacy:rNN
 tests/check_indexing.py 先索引沒先確認的靜態檢查；--self-test 自我驗證
 tests/rerun_old.py    拿現在的測試跑舊版程式、失敗分三類：python -m tests.rerun_old <舊版目錄>

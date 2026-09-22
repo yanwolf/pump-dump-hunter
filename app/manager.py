@@ -176,6 +176,7 @@ def close_now(sym, pos, by):
     for attempt in (1, 2):
         if not qty: break                            # 查不到（None）或自己已經沒了（0）→ 不送單
         try:
+            qty = B.cap_market_qty(sym, qty)[0]            # 超過交易所市價單上限就分批：這次平上限那麼多，剩下的下一次／下一輪
             o = B.market_order(sym, close_side, qty, reduce_only=True)
             f = B.confirm_fill(sym, o)                           # 卡在 NEW 的單會被撤掉，不跟下一次的平倉單重疊（r43）
             if f["executed"] > 0: px = f["avg"] or px

@@ -115,8 +115,12 @@ def filters(symbol):
         except Exception: info = _get("/fapi/v1/exchangeInfo", base=C.FAPI)
         for sy in info["symbols"]:
             f = {x["filterType"]: x for x in sy["filters"]}
+            mk = f.get("MARKET_LOT_SIZE") or {}
+            maxes = [float(x) for x in (f["LOT_SIZE"].get("maxQty"), mk.get("maxQty")) if x and float(x) > 0]
             _F[sy["symbol"]] = dict(
                 step=float(f["LOT_SIZE"]["stepSize"]), minqty=float(f["LOT_SIZE"]["minQty"]),
+                # 市價單的數量上限：LOT_SIZE 與 MARKET_LOT_SIZE 取小的（市價單的通常小很多）。以前沒讀，小幣換算出的顆數超過上限就被 -4005 拒絕
+                mmax=min(maxes) if maxes else None,
                 tick=float(f["PRICE_FILTER"]["tickSize"]),
                 minnot=float((f.get("MIN_NOTIONAL") or {}).get("notional") or 0))
     return _F.get(symbol) or dict(step=1.0, minqty=1.0, tick=1e-8, minnot=5.0)
@@ -131,6 +135,12 @@ def round_qty(symbol, qty):
     f = filters(symbol); q = _fmt(qty, f["step"])
     if float(q) < f["minqty"]: raise RuntimeError(f"數量 {q} 低於最小下單量 {f['minqty']}")
     return q
+
+def cap_market_qty(symbol, qty):
+    """市價單數量照交易所上限往下壓。回傳 (數量, 有沒有壓, 上限)。上限查不到就不壓（交易所會拒絕，照原本的錯誤處理）。"""
+    mx = filters(symbol).get("mmax")
+    if not mx or qty <= mx: return qty, False, mx
+    return float(round_qty(symbol, mx)), True, mx
 
 def round_price(symbol, price):
     return _fmt(price, filters(symbol)["tick"], down=False)

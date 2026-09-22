@@ -196,6 +196,15 @@ def place(sym, eid, sig, sz, rec):
                 sz = dict(sz, qty=sz["qty"] * k, notional=round(sz["notional"] * k, 2),
                           risk_usdt=round(sz["risk_usdt"] * k, 2))
             sz = dict(sz, leverage=lev); rec.update(leverage=lev, qty=sz["qty"], notional=sz["notional"])
+        # 交易所對這檔市價單的數量上限：小幣價格低，同樣金額換成顆數很大，超過會被 -4005 拒絕、訊號就丟了。
+        # 壓到上限（部位變小、風險變小），並講明
+        q0 = sz["qty"]; qcap, capped, mx = B.cap_market_qty(sym, q0)
+        if capped:
+            k = qcap / q0
+            sz = dict(sz, qty=qcap, notional=round(sz["notional"] * k, 2), risk_usdt=round(sz["risk_usdt"] * k, 2))
+            rec.update(qty=qcap, notional=sz["notional"], capped=f"數量 {q0:g} 超過交易所市價單上限 {mx:g}，改下 {qcap:g}")
+            _say(lambda: f"ℹ️ {sym} 引擎{eid} 數量 {q0:g} 超過交易所市價單上限 {mx:g}，改下 {qcap:g}"
+                         f"（名目約 {sz['notional']:.0f} U、風險約 {sz['risk_usdt']:.2f} U，比原本小）", sym)
         o = B.market_order(sym, "BUY" if is_long else "SELL", sz["qty"])
         f = B.confirm_fill(sym, o)                              # 「成功」看 executedQty（清單第 15 條）
         if not f["known"]: raise RuntimeError(f"成交狀態查不到（最後狀態 {f['status']}）")   # → 結果不明，保留 pending 交給對帳

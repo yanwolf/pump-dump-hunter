@@ -53,6 +53,7 @@ class FakeBinance:
         self._traced = {}
         self.seen = set()                # 碰過的幣（全量表會列出它們，數量 0 也列）
         self.orders = {}                 # 市價單：orderId → 訂單（查單、撤單用）
+        self.market_max = {}             # 幣 → 市價單最大數量（MARKET_LOT_SIZE.maxQty）；沒設 = 1,000,000
         self.fill_mode = None            # 成交情境：callable(p) → filled／later／never／partial／expired（None = 立刻成交）
         self._cur_oid = None                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
         self.trade_queries = []          # 每次查成交明細：{symbol, untraced}（清單用法第 5 點 r33：歸零不留成交）
@@ -147,7 +148,9 @@ class FakeBinance:
             return self.rows()
         if path == "/fapi/v1/exchangeInfo":
             return {"symbols": [dict(symbol=s, filters=[
-                dict(filterType="LOT_SIZE", stepSize="1", minQty="1"),
+                dict(filterType="LOT_SIZE", stepSize="1", minQty="1", maxQty="10000000"),
+                # 市價單另有一組規格，上限通常比限價單小很多（真的幣安就是這樣；以前沒模擬，-4005 在任何測試裡都不會出現）
+                dict(filterType="MARKET_LOT_SIZE", stepSize="1", minQty="1", maxQty=str(self.market_max.get(s, 1000000))),
                 dict(filterType="PRICE_FILTER", tickSize="0.0001"),
                 dict(filterType="MIN_NOTIONAL", notional="5")]) for s in ("XUSDT", "YUSDT")]}
         if path == "/fapi/v1/leverage": return {"leverage": int(p.get("leverage", 1))}
@@ -213,6 +216,8 @@ class FakeBinance:
           never（一直 NEW，撤單後 CANCELED 成交 0）／partial（先成交 40%，其餘卡著，撤單後 CANCELED 保留已成交）／expired（EXPIRED 成交 0）"""
         self._check_mode(url, p, reduce=False)
         q = float(p["quantity"])
+        if q > self.market_max.get(p["symbol"], 1000000):
+            self._err(url, 400, '{"code":-4005,"msg":"Quantity greater than max quantity."}')
         mode = self.fill_mode(p) if callable(self.fill_mode) else "filled"
         self.next_id += 1; oid = self.next_id
         o = dict(orderId=oid, symbol=p["symbol"], side=p["side"], type="MARKET", origQty=str(q), status="NEW",
