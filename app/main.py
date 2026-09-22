@@ -423,7 +423,12 @@ def manage(act, sym, eid="?", stop=None):
                 own = dict(store.get().get("open", {})); own[sym] = rec; store.update(open=own)   # 保留部位與 want_close
             return dict(error=f"{sym} 平倉沒有完成（{e}），部位與停損都保留" + ("，每輪會自動重試" if mine else ""))
         _refresh()
-        return dict(ok=True, msg=f"{sym} 已平倉" + (f" @ {r['exit']:.6g}，損益 {r['pnl']:+.2f} U" if r.get("exit") and r.get("pnl") is not None else ""))
+        px = (f" @ {r['exit']:.6g}，損益 {r['pnl']:+.2f} U" if manager.num(r.get("exit")) and manager.num(r.get("pnl")) is not None else "")
+        if r.get("orders_sent") == 0:
+            # 這次沒有送單：交易所端早就平掉了。回應照寫「已平倉」的話，使用者會以為是這次按的平倉平掉的（清單第 8 條 r58）
+            return dict(ok=True, msg=f"{sym} 交易所上這筆已經平掉（成交明細查到平倉成交{px}），照成交明細結帳；這次沒有送平倉單"
+                        + ("。交易所上現在那張是別的部位（均價不同，別的專案或 App 開的），沒有動它" if r.get("replaced") else ""))
+        return dict(ok=True, msg=f"{sym} 已平倉" + px)
     if act == "adopt":
         if not getattr(store, "LOADED", True): return dict(error=f"{sym} 持倉紀錄還沒載入（狀態檔讀取失敗），不能認領——認領會把部位寫進還沒載入的帳")
         if mine: return dict(error=f"{sym} 已經在帳上，不需要認領")

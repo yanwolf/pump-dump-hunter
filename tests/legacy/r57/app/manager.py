@@ -151,13 +151,56 @@ def _once_err(sym, stage, e):
 class CloseFailed(Exception):
     """平倉沒完成；close_now 已計數並依節奏告警，部位與停損都保留。"""
 
-def remaining(sym, side, base=0.0):
+def avg_mismatch(pos, rows):
+    """交易所這一側的均價跟帳上的成交價差超過 0.2%，回傳交易所均價；沒有出入、有基準部位（均價是合併的）或成交價未知，回 None。"""
+    fill, side = num(pos.get("fill")), pos.get("side")
+    if (num(pos.get("base_qty")) or 0) > 1e-9 or not fill: return None
+    for r in rows:
+        if B.side_of(r) == side and abs(float(r.get("positionAmt") or 0)) > 0:
+            e = float(r.get("entryPrice") or 0)
+            if e and abs(e - fill) / fill > 0.002: return e
+    return None
+
+def replaced(pos, rows, sym=None):
+    """交易所上這一側的部位，是不是已經不是帳上那一筆（清單第 8 條 r53、r54、r56）。回 True／False／None（判斷不了）。
+    **兩個證據才判定重開**：均價不同，而且成交明細裡查到這筆的平倉成交（湊滿帳上數量）。
+    只看均價的話，帳上成交價跟交易所均價有出入的原因不只是重開——舊版記法不同、認領時記的值——部署那一刻所有這種實單持倉
+    都會被判成已平倉：結帳、撤停損，部位還在交易所上變成裸倉；手動平倉回「已平倉」卻沒送單（r56）。
+    重開一定伴隨原本那筆的平倉成交（停損觸發、App 手動平），所以真的重開時不會漏。
+    - 均價沒有出入 → False（同一筆）
+    - 均價不同、沒有平倉成交 → False（同一筆，只是記法有出入；照常管理）
+    - 均價不同、成交明細查不到 → None（判斷不了：這輪不送單、不結帳）"""
+    if avg_mismatch(pos, rows) is None: return False
+    sym = sym or next((r.get("symbol") for r in rows if r.get("symbol")), None)
+    tr = trades_after(sym, pos)
+    if tr is None: return None
+    closed_q = sum(float(t.get("qty") or 0) for t in tr)
+    return closed_q >= (num(pos.get("qty")) or 0) * 0.999
+
+def remaining(sym, side, base=0.0, pos=None):
     """交易所上「自己的」這一側還剩多少：這一側總數扣掉送單前就有的基準數量（清單第 3 條 r14、第 7 條 r15）。
     - 帶 symbol 逐幣查，不用全量表：全量表可能回 200 加空清單（清單第 2 條 r15）。
-    - 查詢失敗回 None——不能當成 0（清單第 2 條）。"""
-    try: total = B.side_qty(sym, side)
+    - 查詢失敗回 None——不能當成 0（清單第 2 條）。
+    - 帶 pos 時同時確認交易所上那一筆就是帳上那一筆（r53）：不是 → 我們的已經沒了，回 0，並記在 pos 上讓呼叫端講明。"""
+    try: rows = B.position_rows(sym)
     except Exception: return None
+    rp = replaced(pos, rows, sym) if pos is not None else False
+    if rp is None:                                                    # 均價不同、成交明細查不到：判斷不了，當成查不到（不送單）
+        _log(f"{sym} 均價跟帳上不同、成交明細查不到，判斷不了是不是同一筆，這輪不送單"); return None
+    if rp:
+        if not pos.get("replaced"):
+            pos["replaced"] = True
+            e = next((float(r["entryPrice"]) for r in rows if B.side_of(r) == side), 0)
+            telegram.send(f"⚠️ {sym} 引擎{pos.get('engine')} 交易所上這一側的部位均價 {e:.6g} 跟帳上的成交價 {pos.get('fill'):.6g} 不同——"
+                          "原本那筆已經被平掉、現在是別的部位（別的專案或 App 開的）。不對它送任何單，交給對帳結帳")
+        return 0.0
+    total = sum(abs(float(p["positionAmt"])) for p in rows if B.side_of(p) == side)
     return max(0.0, round(total - (base or 0.0), 10))
+
+def same_record(a, b):
+    """兩份部位紀錄是不是同一筆（r53）：有識別碼比識別碼，舊紀錄沒有就比開倉時間＋引擎＋成交價。"""
+    if a.get("pid") or b.get("pid"): return a.get("pid") == b.get("pid")
+    return (a.get("ts"), a.get("engine"), a.get("fill")) == (b.get("ts"), b.get("engine"), b.get("fill"))
 
 def close_now(sym, pos, by):
     """市價平掉剩餘部位並記帳。平倉單送出後一定看結果（清單第 8 條 r12）：
@@ -169,7 +212,7 @@ def close_now(sym, pos, by):
     px, err = None, None
     # 送單前先確認自己還有多少（清單第 7 條 r15）：扣掉基準後沒有了就不送——
     # 單向共用帳號裡同側有別人的部位時，reduceOnly 單會把別人的平掉。數量取「交易所這一側 − 基準」與帳上的小者。
-    left = remaining(sym, side, base)
+    left = remaining(sym, side, base, pos)
     if left is None: qty = None
     elif left == 0: qty = 0
     else: qty = min(pos["qty"], left)
@@ -184,7 +227,7 @@ def close_now(sym, pos, by):
                 pos["close_partial"] = True                      # 部分成交過：出場價要兩段加權，不能只用最後一張單（r43，跟著部位存檔）
         except Exception as e: err = e
         time.sleep(0.5)                              # 讓交易所的部位表跟上
-        left = remaining(sym, side, base)
+        left = remaining(sym, side, base, pos)
         if left is None or left == 0: break
         if attempt == 1 and left != qty: qty = min(left, pos["qty"]); continue   # 部分成交或帳實不符 → 用自己的實際剩餘重送
         if attempt == 1 and err is not None and not B.definite_reject(err): continue   # 逾時／5xx 且數量沒變 → 再送一次
@@ -236,7 +279,7 @@ def place_stop(sym, pos, price, qty=None, known_left=None):
     - 自己的部位已經沒了 → ("gone", None)：不掛，交給對帳結帳（否則就是孤兒單，第 7、13 條）
     - 還在 → 數量取「交易所−基準」與帳上／指定數量的小者，reduce-only 帶數量（不用 closePosition，有基準時不會平到別人的，r21）
     交易所拒絕照樣往上拋，讓呼叫端照自己的規則計數、重試。"""
-    left = known_left if known_left is not None else remaining(sym, pos["side"], pos.get("base_qty") or 0.0)
+    left = known_left if known_left is not None else remaining(sym, pos["side"], pos.get("base_qty") or 0.0, pos)
     if left is None: return "unknown", None
     if left <= 0: return "gone", None
     q = min(qty or pos["qty"], left)
@@ -366,6 +409,10 @@ def step(sym, pos):
         r_now = d * (fav - pos["entry"]) / r_unit
         try:
             if R["tp1_r"] is not None and not pos.get("tp1") and r_now >= R["tp1_r"]:
+                # 送減碼單前先確認交易所上還是帳上那一筆（r20、r53）：已經沒了、或換成別人的部位，就不送
+                left = remaining(sym, pos["side"], pos.get("base_qty") or 0.0, pos)
+                if not left:
+                    _log(f"{sym} 1R 減碼前確認部位：{'查不到' if left is None else '已經不是帳上那一筆或沒了'}，不送單"); return None
                 half = float(B.round_qty(sym, pos["qty"] / 2))
                 o = B.market_order(sym, "SELL" if d > 0 else "BUY", half, reduce_only=True)
                 f = B.confirm_fill(sym, o)                      # 成交 0 不能照樣把帳上數量減半（清單第 15 條）
@@ -488,5 +535,6 @@ def run():
             except Exception as e: _step_err(sym, "出場判斷", e)
         own = dict(store.get().get("open", {}))
         if res == "closed": own.pop(sym, None)
-        elif sym in own: own[sym] = pos
+        elif sym in own and same_record(own[sym], pos): own[sym] = pos   # 寫回前確認帳上還是同一筆（r53）：換成別筆就不能用舊的蓋掉
+        elif sym in own: _log(f"{sym} 帳上已經換成另一筆，出場管理手上的舊紀錄不寫回")
         store.update(open=own)

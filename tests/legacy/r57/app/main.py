@@ -2,7 +2,7 @@
 import os, time
 os.environ["TZ"] = os.environ.get("APP_TZ", "CST-8")   # 台灣 UTC+8、無夏令時間；POSIX 寫法不需要 tzdata
 time.tzset()
-import base64, hmac, json, threading, traceback
+import base64, hmac, json, threading, traceback, uuid
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from . import backtest, binance as B, config as C, manager, params, presets, preflight, risk, scanner, store, sweep, telegram
@@ -76,7 +76,7 @@ def reconcile(force=False):
                     fill = round((avg * (mine + base) - rec["base_px"] * base) / mine, 10)
                 else: fill = avg
                 stop = rec["stop"]
-                pos = dict(engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=(rec["ts"] if manager.num(rec.get("ts")) is not None else now_ms),   # 值是 None 時 .get 的預設擋不住（r33）
+                pos = dict(pid=uuid.uuid4().hex[:12], engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=(rec["ts"] if manager.num(rec.get("ts")) is not None else now_ms),   # 值是 None 時 .get 的預設擋不住（r33）
                            bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), entry=rec["entry"], fill=fill, stop=stop, qty=qty,
                            base_qty=base, r_unit=abs(rec["entry"] - stop), risk_usdt=round(abs(rec["entry"] - stop) * qty, 4),
                            state="初始", adopted=True)
@@ -112,6 +112,17 @@ def reconcile(force=False):
                     still[sym] = rec; continue
             base = rec.get("base_qty") or 0.0
             left = abs(float(row["positionAmt"])) - base if row else 0.0     # 自己的 = 這一側 − 基準（第 7 條 r15）
+            rp = manager.replaced(rec, [row], sym) if row else False
+            if rp is None:
+                # 均價不同、成交明細查不到：判斷不了是不是同一筆——這輪不結帳、不動停損（r56）
+                store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 均價跟帳上不同、成交明細查不到，這輪不對帳")
+                still[sym] = rec; continue
+            if rp:
+                # 均價不同、而且查到原本那筆的平倉成交：原本那筆已經被平掉、現在是別人的部位（r53、r56）→ 我們那筆結帳，別人的不碰
+                e_new = float(row.get("entryPrice") or 0)
+                _say(lambda: f"⚠️ {sym} 引擎{rec.get('engine')} 交易所上這一側的均價 {e_new:.6g} 跟帳上的成交價 {rec.get('fill'):.6g} 不同——"
+                             "原本那筆已經平掉，現在的部位不是本策略的；本策略那筆照成交明細結帳", sym)
+                left = 0.0
             if left > 1e-9:
                 if rec.get("qty") and left < rec["qty"] - 1e-9:          # 數量變少：記部分出場（清單第 8 條 r12，已扣基準）
                     cut = rec["qty"] - left
@@ -232,7 +243,7 @@ def place(sym, eid, sig, sz, rec):
         rec["fill"] = fill; rec["qty"] = qty
         rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
         own = dict(store.get().get("open", {}))
-        own[sym] = dict(engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
+        own[sym] = dict(pid=uuid.uuid4().hex[:12], engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
                         bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), r_unit=abs(sig.entry - stop_px),   # R 用取整後的停損算（第 4 條）
                         entry=sig.entry, fill=fill, stop=stop_px, qty=qty, base_qty=base_qty,
                         risk_usdt=round(abs(sig.entry - stop_px) * qty, 4), state="初始")
@@ -423,7 +434,7 @@ def manage(act, sym, eid="?", stop=None):
         # 交易所那一列是正向證據；走共用送停損處（清單第 2 條 r20）。via 一起記，撤單才知道打哪個端點
         st, so = manager.place_stop(sym, dict(side=side, qty=qty, base_qty=0), stop, known_left=qty)
         own = dict(store.get().get("open", {}))
-        own[sym] = dict(engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
+        own[sym] = dict(pid=uuid.uuid4().hex[:12], engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
                         ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty, r_unit=abs(entry - stop),
                         risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), stop_via=so.get("via"), state="初始",
                         trade_mark=manager.mark_now(sym))   # 起始界線（r32）
