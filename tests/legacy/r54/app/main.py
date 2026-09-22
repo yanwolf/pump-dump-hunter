@@ -2,7 +2,7 @@
 import os, time
 os.environ["TZ"] = os.environ.get("APP_TZ", "CST-8")   # 台灣 UTC+8、無夏令時間；POSIX 寫法不需要 tzdata
 time.tzset()
-import base64, hmac, json, threading, traceback
+import base64, hmac, json, threading, traceback, uuid
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from . import backtest, binance as B, config as C, manager, params, presets, preflight, risk, scanner, store, sweep, telegram
@@ -76,7 +76,7 @@ def reconcile(force=False):
                     fill = round((avg * (mine + base) - rec["base_px"] * base) / mine, 10)
                 else: fill = avg
                 stop = rec["stop"]
-                pos = dict(engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=(rec["ts"] if manager.num(rec.get("ts")) is not None else now_ms),   # 值是 None 時 .get 的預設擋不住（r33）
+                pos = dict(pid=uuid.uuid4().hex[:12], engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=(rec["ts"] if manager.num(rec.get("ts")) is not None else now_ms),   # 值是 None 時 .get 的預設擋不住（r33）
                            bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), entry=rec["entry"], fill=fill, stop=stop, qty=qty,
                            base_qty=base, r_unit=abs(rec["entry"] - stop), risk_usdt=round(abs(rec["entry"] - stop) * qty, 4),
                            state="初始", adopted=True)
@@ -112,6 +112,12 @@ def reconcile(force=False):
                     still[sym] = rec; continue
             base = rec.get("base_qty") or 0.0
             left = abs(float(row["positionAmt"])) - base if row else 0.0     # 自己的 = 這一側 − 基準（第 7 條 r15）
+            if row and manager.replaced(rec, [row]):
+                # 交易所上這一側的均價跟帳上的成交價不同：原本那筆已經被平掉、現在是別人的部位（r53）→ 我們那筆結帳，別人的不碰
+                e_new = float(row.get("entryPrice") or 0)
+                _say(lambda: f"⚠️ {sym} 引擎{rec.get('engine')} 交易所上這一側的均價 {e_new:.6g} 跟帳上的成交價 {rec.get('fill'):.6g} 不同——"
+                             "原本那筆已經平掉，現在的部位不是本策略的；本策略那筆照成交明細結帳", sym)
+                left = 0.0
             if left > 1e-9:
                 if rec.get("qty") and left < rec["qty"] - 1e-9:          # 數量變少：記部分出場（清單第 8 條 r12，已扣基準）
                     cut = rec["qty"] - left
@@ -160,6 +166,15 @@ def place(sym, eid, sig, sz, rec):
         # 持倉紀錄還沒載入：開倉函式本身就擋（自動、手動都經過這裡，清單第 8 條 r38、r39）
         rec["skipped"] = "持倉紀錄還沒載入（狀態檔讀取失敗），暫停開新倉"
         return rec
+    # 拿到引擎鎖之後再檢查一次同一檔的狀態（清單第 8 條 r50：鎖只讓兩張單排隊，不會讓第二張不送）。
+    # 呼叫端在拿鎖之前也檢查過，但那時看到的可能是舊的——另一條剛好在開同一檔，等它做完、這條拿到鎖，那個判斷已經過期。
+    _own, _pend = store.get().get("open", {}), store.get().get("pending", {})
+    if sym in _own:
+        rec["skipped"] = f"這檔已有部位（引擎{_own[sym].get('engine')}），不重複開倉"; return rec
+    if sym in _pend:
+        rec["skipped"] = f"這檔已有一筆正在等確認的單（引擎{_pend[sym].get('engine')}），不重複開倉"; return rec
+    if len(_own) + len(_pend) >= C.SIZING["max_positions"]:
+        rec["skipped"] = f"本策略持倉已 {len(_own) + len(_pend)} 筆（含等確認），達上限"; return rec
     is_long = sig.side == "LONG"
     try: stop_px = float(B.round_price(sym, sig.stop))       # 實際掛出去的停損價（照 tickSize，第 4 條）
     except Exception: stop_px = sig.stop
@@ -187,6 +202,15 @@ def place(sym, eid, sig, sz, rec):
                 sz = dict(sz, qty=sz["qty"] * k, notional=round(sz["notional"] * k, 2),
                           risk_usdt=round(sz["risk_usdt"] * k, 2))
             sz = dict(sz, leverage=lev); rec.update(leverage=lev, qty=sz["qty"], notional=sz["notional"])
+        # 交易所對這檔市價單的數量上限：小幣價格低，同樣金額換成顆數很大，超過會被 -4005 拒絕、訊號就丟了。
+        # 壓到上限（部位變小、風險變小），並講明
+        q0 = sz["qty"]; qcap, capped, mx = B.cap_market_qty(sym, q0)
+        if capped:
+            k = qcap / q0
+            sz = dict(sz, qty=qcap, notional=round(sz["notional"] * k, 2), risk_usdt=round(sz["risk_usdt"] * k, 2))
+            rec.update(qty=qcap, notional=sz["notional"], capped=f"數量 {q0:g} 超過交易所市價單上限 {mx:g}，改下 {qcap:g}")
+            _say(lambda: f"ℹ️ {sym} 引擎{eid} 數量 {q0:g} 超過交易所市價單上限 {mx:g}，改下 {qcap:g}"
+                         f"（名目約 {sz['notional']:.0f} U、風險約 {sz['risk_usdt']:.2f} U，比原本小）", sym)
         o = B.market_order(sym, "BUY" if is_long else "SELL", sz["qty"])
         f = B.confirm_fill(sym, o)                              # 「成功」看 executedQty（清單第 15 條）
         if not f["known"]: raise RuntimeError(f"成交狀態查不到（最後狀態 {f['status']}）")   # → 結果不明，保留 pending 交給對帳
@@ -214,7 +238,7 @@ def place(sym, eid, sig, sz, rec):
         rec["fill"] = fill; rec["qty"] = qty
         rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
         own = dict(store.get().get("open", {}))
-        own[sym] = dict(engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
+        own[sym] = dict(pid=uuid.uuid4().hex[:12], engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
                         bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), r_unit=abs(sig.entry - stop_px),   # R 用取整後的停損算（第 4 條）
                         entry=sig.entry, fill=fill, stop=stop_px, qty=qty, base_qty=base_qty,
                         risk_usdt=round(abs(sig.entry - stop_px) * qty, 4), state="初始")
@@ -405,7 +429,7 @@ def manage(act, sym, eid="?", stop=None):
         # 交易所那一列是正向證據；走共用送停損處（清單第 2 條 r20）。via 一起記，撤單才知道打哪個端點
         st, so = manager.place_stop(sym, dict(side=side, qty=qty, base_qty=0), stop, known_left=qty)
         own = dict(store.get().get("open", {}))
-        own[sym] = dict(engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
+        own[sym] = dict(pid=uuid.uuid4().hex[:12], engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
                         ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty, r_unit=abs(entry - stop),
                         risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), stop_via=so.get("via"), state="初始",
                         trade_mark=manager.mark_now(sym))   # 起始界線（r32）

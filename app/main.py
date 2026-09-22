@@ -112,8 +112,13 @@ def reconcile(force=False):
                     still[sym] = rec; continue
             base = rec.get("base_qty") or 0.0
             left = abs(float(row["positionAmt"])) - base if row else 0.0     # 自己的 = 這一側 − 基準（第 7 條 r15）
-            if row and manager.replaced(rec, [row]):
-                # 交易所上這一側的均價跟帳上的成交價不同：原本那筆已經被平掉、現在是別人的部位（r53）→ 我們那筆結帳，別人的不碰
+            rp = manager.replaced(rec, [row], sym) if row else False
+            if rp is None:
+                # 均價不同、成交明細查不到：判斷不了是不是同一筆——這輪不結帳、不動停損（r56）
+                store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 均價跟帳上不同、成交明細查不到，這輪不對帳")
+                still[sym] = rec; continue
+            if rp:
+                # 均價不同、而且查到原本那筆的平倉成交：原本那筆已經被平掉、現在是別人的部位（r53、r56）→ 我們那筆結帳，別人的不碰
                 e_new = float(row.get("entryPrice") or 0)
                 _say(lambda: f"⚠️ {sym} 引擎{rec.get('engine')} 交易所上這一側的均價 {e_new:.6g} 跟帳上的成交價 {rec.get('fill'):.6g} 不同——"
                              "原本那筆已經平掉，現在的部位不是本策略的；本策略那筆照成交明細結帳", sym)

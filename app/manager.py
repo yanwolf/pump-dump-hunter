@@ -151,18 +151,31 @@ def _once_err(sym, stage, e):
 class CloseFailed(Exception):
     """平倉沒完成；close_now 已計數並依節奏告警，部位與停損都保留。"""
 
-def replaced(pos, rows):
-    """交易所上這一側的部位，是不是已經不是帳上那一筆（清單第 8 條 r53 的交易所端版本）。
-    我們的部位在交易所端被平掉（停損觸發）、同一檔同方向又出現新部位（別的專案、App）時，「這一側還有沒有部位」照樣是有——
-    舊部位的進場價、停損單號就會被拿去動別人的新部位。引擎鎖擋不到交易所端的事，要比對均價：
-    沒有基準部位、帳上成交價已知時，交易所這一側的均價跟帳上的成交價差超過 0.2%，就不是同一筆。"""
+def avg_mismatch(pos, rows):
+    """交易所這一側的均價跟帳上的成交價差超過 0.2%，回傳交易所均價；沒有出入、有基準部位（均價是合併的）或成交價未知，回 None。"""
     fill, side = num(pos.get("fill")), pos.get("side")
-    if (num(pos.get("base_qty")) or 0) > 1e-9 or not fill: return False        # 有基準（均價是合併的）或成交價未知：比不了
+    if (num(pos.get("base_qty")) or 0) > 1e-9 or not fill: return None
     for r in rows:
         if B.side_of(r) == side and abs(float(r.get("positionAmt") or 0)) > 0:
             e = float(r.get("entryPrice") or 0)
-            if e and abs(e - fill) / fill > 0.002: return True
-    return False
+            if e and abs(e - fill) / fill > 0.002: return e
+    return None
+
+def replaced(pos, rows, sym=None):
+    """交易所上這一側的部位，是不是已經不是帳上那一筆（清單第 8 條 r53、r54、r56）。回 True／False／None（判斷不了）。
+    **兩個證據才判定重開**：均價不同，而且成交明細裡查到這筆的平倉成交（湊滿帳上數量）。
+    只看均價的話，帳上成交價跟交易所均價有出入的原因不只是重開——舊版記法不同、認領時記的值——部署那一刻所有這種實單持倉
+    都會被判成已平倉：結帳、撤停損，部位還在交易所上變成裸倉；手動平倉回「已平倉」卻沒送單（r56）。
+    重開一定伴隨原本那筆的平倉成交（停損觸發、App 手動平），所以真的重開時不會漏。
+    - 均價沒有出入 → False（同一筆）
+    - 均價不同、沒有平倉成交 → False（同一筆，只是記法有出入；照常管理）
+    - 均價不同、成交明細查不到 → None（判斷不了：這輪不送單、不結帳）"""
+    if avg_mismatch(pos, rows) is None: return False
+    sym = sym or next((r.get("symbol") for r in rows if r.get("symbol")), None)
+    tr = trades_after(sym, pos)
+    if tr is None: return None
+    closed_q = sum(float(t.get("qty") or 0) for t in tr)
+    return closed_q >= (num(pos.get("qty")) or 0) * 0.999
 
 def remaining(sym, side, base=0.0, pos=None):
     """交易所上「自己的」這一側還剩多少：這一側總數扣掉送單前就有的基準數量（清單第 3 條 r14、第 7 條 r15）。
@@ -171,7 +184,10 @@ def remaining(sym, side, base=0.0, pos=None):
     - 帶 pos 時同時確認交易所上那一筆就是帳上那一筆（r53）：不是 → 我們的已經沒了，回 0，並記在 pos 上讓呼叫端講明。"""
     try: rows = B.position_rows(sym)
     except Exception: return None
-    if pos is not None and replaced(pos, rows):
+    rp = replaced(pos, rows, sym) if pos is not None else False
+    if rp is None:                                                    # 均價不同、成交明細查不到：判斷不了，當成查不到（不送單）
+        _log(f"{sym} 均價跟帳上不同、成交明細查不到，判斷不了是不是同一筆，這輪不送單"); return None
+    if rp:
         if not pos.get("replaced"):
             pos["replaced"] = True
             e = next((float(r["entryPrice"]) for r in rows if B.side_of(r) == side), 0)

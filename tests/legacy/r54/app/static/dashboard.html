@@ -121,7 +121,8 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
  $('hstats').innerHTML=[
    ['持倉',Object.keys(s.open||{}).length],['擁擠',s.watch.length],['觀察',s.observe.length],
    ['訊號',s.signals.length],['已下單',s.trades.length],
-   ['可用',e.tier?Math.round(e.tier*(1-e.reserve_pct))+' U':'—']
+   ['錢包',e.balance!=null?Math.round(e.balance).toLocaleString()+' U':(e.error?'<span style=color:var(--gold)>讀不到</span>':'—')],
+   [e.tier?`可用（階梯 ${Math.round(e.tier)} × ${Math.round((1-e.reserve_pct)*100)}%）`:'可用',e.tier?Math.round(e.tier*(1-e.reserve_pct))+' U':'—']
  ].map(([k,v])=>`<span class=stat>${k}<b>${v}</b></span>`).join('');
  const hits=r=>r.hits||'';
  const wcols=['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'];
