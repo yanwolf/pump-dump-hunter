@@ -43,6 +43,10 @@ canary = 'Exception in thread 金絲雀:\nTraceback (most recent call last):\n  
 ok = crash_of(1, "  ❌ [A] 甲\n\n1 項失敗：[\'A\']\n", canary) is None and crash_of(1, "  ❌ [A] 甲\n", tb_test) == "test_r9.py:12"
 print(f"  {'✅' if ok else '❌'} 有印出總結時，金絲雀的 traceback 不算崩掉；沒印出總結才算")
 if not ok: fails.append("crash-canary")
+_, st = evaluate({M: [(False, "（前提）甲", 1), (False, "乙", 1), (False, "（對照組）丙", 1), (True, "丁", 0)]}, {M: []}, {}, min_items=0)
+ok = st["failed"] == 3 and st["failed_pre"] == 2
+print(f"  {'✅' if ok else '❌'} 突變下的失敗分兩類：前提 2、行為 1　{st if not ok else ''}")
+if not ok: fails.append("classify")
 # 解析器
 rows = parse("  ✅ [K2] 甲　細節〔命中3〕\n  ❌ [K2] 乙〔命中0〕\n  ✅ [K2] 丙　x\n  ✅ [K2] 丁〔命中0〕〔基礎設施〕\n")
 ok = rows == [(True, "甲", 3), (False, "乙", 0), (True, "丙", None), (True, "丁", 0)]

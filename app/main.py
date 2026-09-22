@@ -118,10 +118,10 @@ def reconcile(force=False):
                 store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 均價跟帳上不同、成交明細查不到，這輪不對帳")
                 still[sym] = rec; continue
             if rp:
-                # 均價不同、而且查到原本那筆的平倉成交：原本那筆已經被平掉、現在是別人的部位（r53、r56）→ 我們那筆結帳，別人的不碰
+                # 均價不同、而且查到原本那筆的平倉成交：原本那筆已經被平掉、現在是別人的部位（r53、r56）→ 我們那筆結帳，別人的不碰。
+                # 結帳原因與平倉通知寫明這件事（r61）——以前寫死「停損單」，另發一則警告；結帳紀錄本身看不出來
                 e_new = float(row.get("entryPrice") or 0)
-                _say(lambda: f"⚠️ {sym} 引擎{rec.get('engine')} 交易所上這一側的均價 {e_new:.6g} 跟帳上的成交價 {rec.get('fill'):.6g} 不同——"
-                             "原本那筆已經平掉，現在的部位不是本策略的；本策略那筆照成交明細結帳", sym)
+                rec = dict(rec, replaced_by=f"交易所出場；交易所上現在同一側那張是別的部位（均價 {e_new:.6g}，帳上 {rec.get('fill'):.6g}），沒有動它")
                 left = 0.0
             if left > 1e-9:
                 if rec.get("qty") and left < rec["qty"] - 1e-9:          # 數量變少：記部分出場（清單第 8 條 r12，已扣基準）
@@ -135,9 +135,10 @@ def reconcile(force=False):
                                     else "這段損益未知（成交明細查不到，或同側有別人的部位分不出來）"), sym)
                 still[sym] = rec
             else:
-                rec = manager.record_close(sym, rec, "停損單"); changed = True
-                _say(lambda: f"🏁 {sym} 引擎{rec.get('engine')} 停損單觸發出場" +
-                              (f" @ {rec['exit']:.6g}" if manager.num(rec.get("exit")) else "") +
+                by = rec.pop("replaced_by", None) or "停損單"
+                rec = manager.record_close(sym, rec, by); changed = True
+                _say(lambda: f"🏁 {sym} 引擎{rec.get('engine')} " + ("停損單觸發出場" if by == "停損單" else by) +
+                              (f" @ {rec['exit']:.6g}" if manager.num(rec.get("exit")) else "，出場價成交明細查不到，記未知") +
                               (f"，損益 {rec['pnl']:+.2f} U" if manager.num(rec.get("pnl")) is not None else "，損益未知") +
                               (f"（{rec['r']:+.2f}R）" if rec.get("r") is not None else ""), sym)
             manager._step_ok(sym, "對帳")
@@ -425,8 +426,12 @@ def manage(act, sym, eid="?", stop=None):
         _refresh()
         px = (f" @ {r['exit']:.6g}，損益 {r['pnl']:+.2f} U" if manager.num(r.get("exit")) and manager.num(r.get("pnl")) is not None else "")
         if r.get("orders_sent") == 0:
-            # 這次沒有送單：交易所端早就平掉了。回應照寫「已平倉」的話，使用者會以為是這次按的平倉平掉的（清單第 8 條 r58）
-            return dict(ok=True, msg=f"{sym} 交易所上這筆已經平掉（成交明細查到平倉成交{px}），照成交明細結帳；這次沒有送平倉單"
+            # 這次沒有送單：交易所端早就平掉了。回應照寫「已平倉」的話，使用者會以為是這次按的平倉平掉的（清單第 8 條 r58）。
+            # 「查到平倉成交」只在真的查到時寫（r60）：重開判定本身要求查到平倉成交；出場價有值就是成交明細查到的（本專案不推估）
+            head = (f"{sym} 交易所上這筆已經平掉（成交明細查到這筆的平倉成交）" if r.get("replaced")
+                    else f"{sym} 交易所上這筆已經平掉（可能是停損觸發）")
+            mid = (f"，照成交明細結帳{px}" if manager.num(r.get("exit")) else "，成交明細查不到，出場價與損益記未知")
+            return dict(ok=True, msg=head + mid + "；這次沒有送平倉單"
                         + ("。交易所上現在那張是別的部位（均價不同，別的專案或 App 開的），沒有動它" if r.get("replaced") else ""))
         return dict(ok=True, msg=f"{sym} 已平倉" + px)
     if act == "adopt":

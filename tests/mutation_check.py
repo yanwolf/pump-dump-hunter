@@ -12,7 +12,7 @@
 """
 import os, re, subprocess, sys
 
-TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27", "tests.test_r30", "tests.test_r33", "tests.test_r36", "tests.test_r39", "tests.test_r43", "tests.test_r47", "tests.test_r50", "tests.test_maxqty", "tests.test_r53", "tests.test_r56", "tests.test_r58"]
+TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27", "tests.test_r30", "tests.test_r33", "tests.test_r36", "tests.test_r39", "tests.test_r43", "tests.test_r47", "tests.test_r50", "tests.test_maxqty", "tests.test_r53", "tests.test_r56", "tests.test_r58", "tests.test_r61"]
 LINE = re.compile(r"^  (✅|❌) \[[^\]]+\] (.+?)(?:　.*?)?(?:〔命中(\d+)〕)?(?:〔基礎設施〕)?$", re.M)
 
 def parse(stdout):
@@ -64,8 +64,11 @@ def evaluate(mut, normal_fail, exempt, min_items=5, crashes=None):
     for k in exempt:
         if k not in used and not any(p.startswith("清單過期") and k[1][:20] in p for p in problems):
             problems.append(f"清單過期：{k[0]}「{k[1][:40]}」突變下已不再通過（或已不存在），請從豁免清單刪掉")
+    # 突變下的失敗分兩類（清單用法第 5 點 r60）：失敗在前提＝只證明這項對被突變的查詢敏感（常常是準備階段就沒走到）；
+    # 失敗在行為＝要測的那一步在突變下確實出了不同的結果。前者多，不代表「那一步查不到時該怎樣」有被驗證——那要靠直接測試。
+    pre = sum(1 for v in failed.values() for n in v if n.startswith("（前提") or n.startswith("（對照組"))
     stats = dict(passed=sum(1 for items in mut.values() for ok, _, _ in items if ok),
-                 failed=sum(len(v) for v in failed.values()), auto=auto, manual=len(used))
+                 failed=sum(len(v) for v in failed.values()), failed_pre=pre, auto=auto, manual=len(used))
     return problems, stats
 
 def run(module, mutate):
@@ -82,7 +85,7 @@ def main():
         mut[mod], c2 = run(mod, "no_base")
         crashes[(mod, "正常")], crashes[(mod, "突變下")] = c1, c2
     problems, st = evaluate(mut, normal_fail, EXEMPT, crashes=crashes)
-    print(f"突變 no_base：{len(TESTS)} 支測試，突變下失敗 {st['failed']} 項、仍通過 {st['passed']} 項"
+    print(f"突變 no_base：{len(TESTS)} 支測試，突變下失敗 {st['failed']} 項（失敗在前提 {st['failed_pre']}、失敗在行為 {st['failed'] - st['failed_pre']}）、仍通過 {st['passed']} 項"
           f"（命中 0 次自動判定無關 {st['auto']} 項、人工豁免 {st['manual']} 項）")
     for p in problems: print("  " + p)
     print("通過" if not problems else f"共 {len(problems)} 個問題")

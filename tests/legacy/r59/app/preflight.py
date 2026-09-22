@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-09-22r54"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
+VERSION = "2026-09-22r59"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):
@@ -51,6 +51,22 @@ def check(trade=False):
         want = C.SIZING["leverage"]
         add("槓桿上限", "ok" if (mx or 0) >= want else "warn", f"上限 {mx}x，策略要 {want}x")
     except Exception as e: add("槓桿上限", "warn", e)
+
+    # 帳上成交價與交易所均價（清單第 8 條 r56）：對不上的持倉列出來、看有沒有平倉成交。
+    # r54／r55 只看均價的版本，部署那一刻會把這些持倉結帳、撤停損；兩個證據的版本只在查到平倉成交時才判定。
+    try:
+        from . import manager as _m
+        lines = []
+        for sym, rec in (store.get().get("open") or {}).items():
+            rows = B.position_rows(sym)
+            e = _m.avg_mismatch(rec, rows)
+            if e is None: continue
+            rp = _m.replaced(rec, rows, sym)
+            why = ("沒有平倉成交：同一筆，照常管理" if rp is False else "查到平倉成交：原本那筆已平、現在是別的部位，對帳會結帳"
+                   if rp else "成交明細查不到：判斷不了，這輪不動")
+            lines.append(f"{sym} 帳上 {rec.get('fill'):.6g}／交易所 {e:.6g}（{why}）")
+        add("帳上成交價與交易所均價", "warn" if lines else "ok", "；".join(lines) if lines else "持倉的帳上成交價都跟交易所均價一致")
+    except Exception as e: add("帳上成交價與交易所均價", "warn", f"檢查失敗 {e}")
 
     # 推播設定：沒設的話所有告警都不會送出（清單第 8 條 r39）
     from . import telegram as _tg
