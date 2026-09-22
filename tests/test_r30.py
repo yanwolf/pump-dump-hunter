@@ -15,7 +15,7 @@ def own_pos(fx, sym="XUSDT", qty=100, side="LONG", stop=0.9, **extra):
 
 def app_reduce(fx, sym, qty, px):
     """模擬在 App 手動減碼：交易所上真的成交一筆（在指定價格），程式不知道。"""
-    fx._reduce(sym, "LONG", qty, px)
+    if fx.qty(sym, "LONG") >= qty: fx._reduce(sym, "LONG", qty, px)      # 前提不成立時不讓測試崩掉（r35）
     return fx.trades[-1]
 
 def seg_pnl(t): return float(t["realizedPnl"]) - float(t["commission"])

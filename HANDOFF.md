@@ -33,6 +33,8 @@ tests/test_r53.py     清單 r51→r53 差異的行為測試：每條會送單�
 tests/test_r56.py     清單 r54→r56：均價不同＋查到平倉成交才判定重開；自檢列出對不上的持倉（python -m tests.test_r56）
 tests/test_r58.py     清單 r57→r58：手動平倉遇到交易所端已平掉，回應講明這次沒有送單（python -m tests.test_r58）
 tests/test_r61.py     清單 r59→r61：回應與結帳原因照實寫；6 個「某一步查不到」的直接測試（python -m tests.test_r61）
+tests/test_r64.py     清單 r62→r64：平倉通知三種出場的說明都在通知本身、沒有風控字樣（python -m tests.test_r64）
+tests/check_repeat.py 犯到第三次的測試錯誤做成靜態檢查：崩掉守護、新介面守護；--self-test 自我驗證
 tests/test_maxqty.py  交易所市價單數量上限（-4005，2026-09-22 SKRUSDT 實單）：開倉壓到上限、平倉分批
 tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版）；python -m tests.rerun_old legacy:rNN
 tests/check_indexing.py 先索引沒先確認的靜態檢查；--self-test 自我驗證

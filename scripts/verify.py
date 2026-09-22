@@ -38,6 +38,8 @@ for t in tests:
 # 3. 檢查器與它們的自我驗證
 for name, args in [("測試框架自我驗證", ["-m", "tests.harness_selftest"]),
                    ("測試靜態檢查（含金絲雀）", ["-m", "tests.check_tests"]),
+                   ("犯到第三次的測試錯誤（崩掉守護、新介面守護）：自我驗證", ["-m", "tests.check_repeat", "--self-test"]),
+                   ("犯到第三次的測試錯誤（崩掉守護、新介面守護）", ["-m", "tests.check_repeat"]),
                    ("先索引沒先確認：自我驗證", ["-m", "tests.check_indexing", "--self-test"]),
                    ("先索引沒先確認（含前提本身）", ["-m", "tests.check_indexing"]),
                    ("回傳原因語法樹檢查：自我驗證", ["-m", "scripts.check_returns", "--self-test"]),

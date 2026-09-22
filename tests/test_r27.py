@@ -46,7 +46,7 @@ check("P2", "缺成交價與進場價 → 照樣結帳", e is None and len(store
 check("P2", "缺成交價與進場價 → 出場通知真的組出來了，而且講明損益未知", one("🏁 XUSDT 引擎C 時間出場", "損益未知")[0] and not notify_errors(), f"{one('🏁 XUSDT 引擎C 時間出場', '損益未知')[1]}")
 
 fx = fresh(); fx.open("XUSDT", "LONG", 100); own_pos(fx, fill=None)          # 成交價 None（交易所回應沒帶成交均價）
-fx.trigger("XUSDT", "LONG", 40)                                            # 在 App 手動減碼：交易所上真的成交一筆（清單用法第 5 點 r33）
+if fx.qty("XUSDT", "LONG") >= 40: fx.trigger("XUSDT", "LONG", 40)         # 在 App 手動減碼：交易所上真的成交一筆（清單用法第 5 點 r33）
 main._rc["t"] = 0; r, e = run(lambda: main.reconcile(force=True))
 own = store.get().get("open", {}).get("XUSDT") or {}
 check("P3", "（前提）對帳真的偵測到數量減少", own.get("qty") == 60, f"qty={own.get('qty')} err={e}")
@@ -67,7 +67,7 @@ check("P3", "last_t 是 None → 出場判斷不拋錯", not any("出場判斷�
 # =====================================================================
 print("第 8 條 r27：損益未知不能被當成 0 或虧損")
 fx = fresh(); fx.open("XUSDT", "LONG", 100); own_pos(fx, fill=None)
-fx.trigger("XUSDT", "LONG", 40)                                            # 部分出場：交易所上真的成交一筆
+if fx.qty("XUSDT", "LONG") >= 40: fx.trigger("XUSDT", "LONG", 40)         # 部分出場：交易所上真的成交一筆
 fx.inject.append(dict(path="/fapi/v1/userTrades", times=1, kind="empty"))  # 但成交明細查不到 → 這一段損益未知（原因在測試裡明寫，第 22 種）
 mark = len(fx.calls)
 main._rc["t"] = 0; main.reconcile(force=True)

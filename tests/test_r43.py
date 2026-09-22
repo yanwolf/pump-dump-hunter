@@ -145,7 +145,7 @@ check("V9", "讀取失敗 → 存檔不能把壞檔蓋掉（使用者的參數�
 check("V9", "讀取失敗 → 存檔回報失敗（不是靜靜成功）", e is not None or (isinstance(r, dict) and r.get("error")), f"回傳={r} err={e}")
 check("V9", "讀取失敗 → 壞檔複製一份", any(f.startswith("presets.json.bad") for f in os.listdir(os.environ["DATA_DIR"])))
 check("V9", "讀取失敗 → 推播", *one("🐞 參數集檔讀取失敗"))
-os.remove(pp_path)
+if os.path.exists(pp_path): os.remove(pp_path)
 for f in os.listdir(os.environ["DATA_DIR"]):
     if f.startswith("presets.json"): os.remove(os.path.join(os.environ["DATA_DIR"], f))
 

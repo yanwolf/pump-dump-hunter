@@ -209,7 +209,7 @@ def close_now(sym, pos, by):
     - 還是沒平掉 → 保留部位與停損、依節奏告警、拋 CloseFailed；呼叫端每輪會再試（want_close）。"""
     side = pos["side"]; close_side = "SELL" if side == "LONG" else "BUY"
     base = pos.get("base_qty") or 0.0
-    px, err = None, None
+    px, err, sent = None, None, 0                     # sent：這次實際送出幾張平倉單（0 = 交易所端已經平掉，r58）
     # 送單前先確認自己還有多少（清單第 7 條 r15）：扣掉基準後沒有了就不送——
     # 單向共用帳號裡同側有別人的部位時，reduceOnly 單會把別人的平掉。數量取「交易所這一側 − 基準」與帳上的小者。
     left = remaining(sym, side, base, pos)
@@ -220,6 +220,7 @@ def close_now(sym, pos, by):
         if not qty: break                            # 查不到（None）或自己已經沒了（0）→ 不送單
         try:
             qty = B.cap_market_qty(sym, qty)[0]            # 超過交易所市價單上限就分批：這次平上限那麼多，剩下的下一次／下一輪
+            sent += 1
             o = B.market_order(sym, close_side, qty, reduce_only=True)
             f = B.confirm_fill(sym, o)                           # 卡在 NEW 的單會被撤掉，不跟下一次的平倉單重疊（r43）
             if f["executed"] > 0: px = f["avg"] or px
@@ -255,6 +256,7 @@ def close_now(sym, pos, by):
     info = dict(exit=px, pnl=pnl)
     try: info.update({k: v for k, v in close_info(sym, pos).items() if v is not None})   # 成交明細優先，分段加總
     except Exception: pass
+    info["orders_sent"] = sent                            # 手動平倉的回應要分得出「這次按的平倉平掉的」還是「交易所端早就平掉了」
     rec = record_close(sym, pos, by, info)                 # 寫紀錄、移出帳都在裡面
     try:
         telegram.send(f"🏁 {sym} 引擎{pos.get('engine')} {by}出場" +
