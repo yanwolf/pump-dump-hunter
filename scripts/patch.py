@@ -89,48 +89,53 @@ def self_test():
     results = []
     real_pending, ABORT_FILE = ABORT_FILE, os.path.join(d, "pending.json")
     real_exists = os.path.exists(real_pending)
-    try: apply([(a, "甲", "一"), (b, "不存在", "x")]); results.append(("第二處對不到 → 中止", False))
-    except PatchAbort: results.append(("第二處對不到 → 中止", True))
-    results.append(("中止後第一個檔沒被改動", open(a).read() == "甲乙丙\n"))
-    results.append(("故意中止留下待重跑批次（寫在自我驗證的暫存目錄，不是真的那份）", os.path.exists(ABORT_FILE) and os.path.exists(real_pending) == real_exists))
-    clear_pending()                                  # 故意中止的案例之後清掉，不擋到後面的案例（r66）
-    results.append(("clear_pending() 之後待重跑批次消失", not os.path.exists(ABORT_FILE)))
-    try: apply([(a, "乙丙\n", "二三")]); results.append(("結尾換行不一致 → 中止", False))
-    except PatchAbort: results.append(("結尾換行不一致 → 中止", True))
-    try: apply([(a, "甲", "一"), (a, "一乙", "一二"), (b, "丁", "四")]); results.append(("同檔依序套用、跨檔一次寫入", open(a).read() == "一二丙\n" and open(b).read() == "四戊\n"))
-    except PatchAbort as e: results.append((f"同檔依序套用、跨檔一次寫入（{e}）", False))
-    try: apply([(a, "丙", "三", 2)]); results.append(("次數不對 → 中止", False))
-    except PatchAbort: results.append(("次數不對 → 中止", True))
-    pa, pb = os.path.join(d, "a.py"), os.path.join(d, "b.py")
-    open(pa, "w").write("x = 1\n"); open(pb, "w").write("y = 2\n")
-    try: apply([(pa, "x = 1", "x = 2"), (pb, "y = 2", "y = (2")]); results.append(("改完有語法錯 → 中止", False))
-    except PatchAbort: results.append(("改完有語法錯 → 中止", True))
-    clear_pending()
-    try: apply([(pa, "x = 1", "x = os.getcwd()")]); results.append(("改完用了沒匯入的名稱（pyflakes）→ 中止", False))
-    except PatchAbort as e: results.append(("改完用了沒匯入的名稱（pyflakes）→ 中止", "未定義的名稱" in str(e)))
-    results.append(("pyflakes 中止後檔案沒被改動", open(pa).read() == "x = 1\n"))
-    clear_pending()
-    results.append(("語法錯中止後，另一個 .py 也沒被改動", open(pa).read() == "x = 1\n" and open(pb).read() == "y = 2\n"))
-    pd = os.path.join(d, "deco.py")
-    open(pd, "w").write("@property\ndef is_enabled(self):\n    return True\n")
-    try: apply([(pd, "def is_enabled(self):\n", "def helper():\n    pass\n\ndef is_enabled(self):\n")]); results.append(("新函式插在裝飾器後面 → 中止", False))
-    except PatchAbort: results.append(("新函式插在裝飾器後面 → 中止", True))
-    try: apply([(pd, "    return True\n", "    return False\n")]); results.append(("修改被裝飾函式的內容 → 不誤擋", "return False" in open(pd).read()))
-    except PatchAbort as e: results.append((f"修改被裝飾函式的內容 → 不誤擋（{e}）", False))
-    # 中止後只重跑一部分 → 擋下；重跑整批 → 放行（r64）
-    pc, pd2 = os.path.join(d, "c.txt"), os.path.join(d, "d.txt"); open(pc, "w").write("甲\n"); open(pd2, "w").write("乙\n")
-    try: apply([(pc, "甲", "一"), (pd2, "找不到", "二")])   # 第二處錨點寫錯 → 整批中止
-    except PatchAbort: pass
-    try: apply([(pd2, "乙", "二")]); results.append(("中止後只重跑一部分 → 擋下", False))
-    except PatchAbort: results.append(("中止後只重跑一部分 → 擋下", open(pc).read() == "甲\n" and open(pd2).read() == "乙\n"))
-    try: apply([(pc, "甲", "一"), (pd2, "乙", "二")]); results.append(("中止後重跑整批（改好錨點）→ 放行", open(pc).read() == "一\n" and open(pd2).read() == "二\n"))
-    except PatchAbort as e: results.append((f"中止後重跑整批（改好錨點）→ 放行（{e}）", False))
-    try: apply([(pd2, "二", "三")]); results.append(("整批成功之後，下一批不受影響", open(pd2).read() == "三\n"))
-    except PatchAbort as e: results.append((f"整批成功之後，下一批不受影響（{e}）", False))
-    open(b, "w").write("第一行\n要刪的一行\n第三行\n")
-    try: apply([(b, "要刪的一行\n", "")]); results.append(("整段刪除（換成空字串）不被換行檢查擋下", open(b).read() == "第一行\n第三行\n"))
-    except PatchAbort as e: results.append((f"整段刪除（換成空字串）不被換行檢查擋下（{e}）", False))
-    ABORT_FILE = real_pending                        # 還原成真的那份（自我驗證期間指到暫存目錄）
+    real_before = open(real_pending, "rb").read() if real_exists else None
+    try:
+        try: apply([(a, "甲", "一"), (b, "不存在", "x")]); results.append(("第二處對不到 → 中止", False))
+        except PatchAbort: results.append(("第二處對不到 → 中止", True))
+        results.append(("中止後第一個檔沒被改動", open(a).read() == "甲乙丙\n"))
+        results.append(("故意中止留下待重跑批次（寫在自我驗證的暫存目錄，不是真的那份）", os.path.exists(ABORT_FILE) and os.path.exists(real_pending) == real_exists))
+        clear_pending()                                  # 故意中止的案例之後清掉，不擋到後面的案例（r66）
+        results.append(("clear_pending() 之後待重跑批次消失", not os.path.exists(ABORT_FILE)))
+        try: apply([(a, "乙丙\n", "二三")]); results.append(("結尾換行不一致 → 中止", False))
+        except PatchAbort: results.append(("結尾換行不一致 → 中止", True))
+        try: apply([(a, "甲", "一"), (a, "一乙", "一二"), (b, "丁", "四")]); results.append(("同檔依序套用、跨檔一次寫入", open(a).read() == "一二丙\n" and open(b).read() == "四戊\n"))
+        except PatchAbort as e: results.append((f"同檔依序套用、跨檔一次寫入（{e}）", False))
+        try: apply([(a, "丙", "三", 2)]); results.append(("次數不對 → 中止", False))
+        except PatchAbort: results.append(("次數不對 → 中止", True))
+        pa, pb = os.path.join(d, "a.py"), os.path.join(d, "b.py")
+        open(pa, "w").write("x = 1\n"); open(pb, "w").write("y = 2\n")
+        try: apply([(pa, "x = 1", "x = 2"), (pb, "y = 2", "y = (2")]); results.append(("改完有語法錯 → 中止", False))
+        except PatchAbort: results.append(("改完有語法錯 → 中止", True))
+        clear_pending()
+        try: apply([(pa, "x = 1", "x = os.getcwd()")]); results.append(("改完用了沒匯入的名稱（pyflakes）→ 中止", False))
+        except PatchAbort as e: results.append(("改完用了沒匯入的名稱（pyflakes）→ 中止", "未定義的名稱" in str(e)))
+        results.append(("pyflakes 中止後檔案沒被改動", open(pa).read() == "x = 1\n"))
+        clear_pending()
+        results.append(("語法錯中止後，另一個 .py 也沒被改動", open(pa).read() == "x = 1\n" and open(pb).read() == "y = 2\n"))
+        pd = os.path.join(d, "deco.py")
+        open(pd, "w").write("@property\ndef is_enabled(self):\n    return True\n")
+        try: apply([(pd, "def is_enabled(self):\n", "def helper():\n    pass\n\ndef is_enabled(self):\n")]); results.append(("新函式插在裝飾器後面 → 中止", False))
+        except PatchAbort: results.append(("新函式插在裝飾器後面 → 中止", True))
+        try: apply([(pd, "    return True\n", "    return False\n")]); results.append(("修改被裝飾函式的內容 → 不誤擋", "return False" in open(pd).read()))
+        except PatchAbort as e: results.append((f"修改被裝飾函式的內容 → 不誤擋（{e}）", False))
+        # 中止後只重跑一部分 → 擋下；重跑整批 → 放行（r64）
+        pc, pd2 = os.path.join(d, "c.txt"), os.path.join(d, "d.txt"); open(pc, "w").write("甲\n"); open(pd2, "w").write("乙\n")
+        try: apply([(pc, "甲", "一"), (pd2, "找不到", "二")])   # 第二處錨點寫錯 → 整批中止
+        except PatchAbort: pass
+        try: apply([(pd2, "乙", "二")]); results.append(("中止後只重跑一部分 → 擋下", False))
+        except PatchAbort: results.append(("中止後只重跑一部分 → 擋下", open(pc).read() == "甲\n" and open(pd2).read() == "乙\n"))
+        try: apply([(pc, "甲", "一"), (pd2, "乙", "二")]); results.append(("中止後重跑整批（改好錨點）→ 放行", open(pc).read() == "一\n" and open(pd2).read() == "二\n"))
+        except PatchAbort as e: results.append((f"中止後重跑整批（改好錨點）→ 放行（{e}）", False))
+        try: apply([(pd2, "二", "三")]); results.append(("整批成功之後，下一批不受影響", open(pd2).read() == "三\n"))
+        except PatchAbort as e: results.append((f"整批成功之後，下一批不受影響（{e}）", False))
+        open(b, "w").write("第一行\n要刪的一行\n第三行\n")
+        try: apply([(b, "要刪的一行\n", "")]); results.append(("整段刪除（換成空字串）不被換行檢查擋下", open(b).read() == "第一行\n第三行\n"))
+        except PatchAbort as e: results.append((f"整段刪除（換成空字串）不被換行檢查擋下（{e}）", False))
+    finally:
+        ABORT_FILE = real_pending                    # 還原成真的那份（自我驗證期間指到暫存目錄）
+        real_after = open(real_pending, "rb").read() if os.path.exists(real_pending) else None
+        if real_after != real_before: raise RuntimeError("自我驗證動到了真的待重跑檔（r69）")   # 真的那份必須原封不動
     bad = 0
     for name, ok in results: print(f"  {'✅' if ok else '❌'} {name}"); bad += not ok
     return bad
