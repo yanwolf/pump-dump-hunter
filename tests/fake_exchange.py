@@ -51,7 +51,10 @@ class FakeBinance:
         self.mutate = os.environ.get("PDH_MUTATE", "")
         self.fired = []                  # 注入觸發紀錄
         self._traced = {}
-        self.seen = set()                # 碰過的幣（全量表會列出它們，數量 0 也列）                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
+        self.seen = set()                # 碰過的幣（全量表會列出它們，數量 0 也列）
+        self.orders = {}                 # 市價單：orderId → 訂單（查單、撤單用）
+        self.fill_mode = None            # 成交情境：callable(p) → filled／later／never／partial／expired（None = 立刻成交）
+        self._cur_oid = None                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
         self.trade_queries = []          # 每次查成交明細：{symbol, untraced}（清單用法第 5 點 r33：歸零不留成交）
         self.mut_hits = 0                # 突變命中次數（被突變的查詢在這個情境被呼叫了幾次）
 
@@ -172,10 +175,18 @@ class FakeBinance:
             self.algo_orders[self.next_id] = o
             return dict(o)
         if path == "/fapi/v1/order":
+            oid = int(p.get("orderId", 0) or 0)
+            if method == "GET":                                          # 查單
+                o = self.orders.get(oid)
+                if not o: self._err(url, 400, '{"code":-2013,"msg":"Order does not exist."}')
+                if o["_mode"] == "later" and o["status"] == "NEW": self._exec(url, o, o["_left"])
+                return self._public(o)
             if method == "DELETE":
-                oid = int(p.get("orderId", 0))
-                if oid not in self.legacy_orders: self._err(url, 400, '{"code":-2011,"msg":"Unknown order sent."}')
-                return self.legacy_orders.pop(oid)
+                if oid in self.legacy_orders: return self.legacy_orders.pop(oid)
+                o = self.orders.get(oid)
+                if not o or o["status"] not in ("NEW", "PARTIALLY_FILLED"): self._err(url, 400, '{"code":-2011,"msg":"Unknown order sent."}')
+                o["status"] = "CANCELED"; o["_left"] = 0
+                return self._public(o)
             if p.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT", "TRAILING_STOP_MARKET"):
                 if self.algo != "404":      # 真實幣安：條件單只收 Algo 端點
                     self._err(url, 400, '{"code":-4120,"msg":"Order type not supported for this endpoint. Please use the Algo Order API endpoints instead."}')
@@ -195,8 +206,39 @@ class FakeBinance:
         if self.hedge and p.get("reduceOnly"): self._err(url, 400, '{"code":-1106,"msg":"Parameter \'reduceonly\' sent when not required."}')
 
     def _market(self, url, p):
+        """市價單。第 15 條（r42、r43）：
+        - 沒帶 newOrderRespType=RESULT → 回 ACK（status NEW、executedQty 0、avgPrice 0），不管實際有沒有成交。
+          以前一律回 FILLED，「沒帶 RESULT」「只看 HTTP 200」在任何測試裡都看不出來——退化值。
+        - 成交情境由 self.fill_mode(p) 決定：filled（立刻成交）／later（回 NEW，第一次查單時才成交）／
+          never（一直 NEW，撤單後 CANCELED 成交 0）／partial（先成交 40%，其餘卡著，撤單後 CANCELED 保留已成交）／expired（EXPIRED 成交 0）"""
         self._check_mode(url, p, reduce=False)
-        s, side, q = p["symbol"], p["side"], float(p["quantity"])
+        q = float(p["quantity"])
+        mode = self.fill_mode(p) if callable(self.fill_mode) else "filled"
+        self.next_id += 1; oid = self.next_id
+        o = dict(orderId=oid, symbol=p["symbol"], side=p["side"], type="MARKET", origQty=str(q), status="NEW",
+                 executedQty="0", avgPrice="0.00000", cumQuote="0", _p=dict(p), _mode=mode, _left=q)
+        self.orders[oid] = o
+        if mode == "filled": self._exec(url, o, q)
+        elif mode == "partial": self._exec(url, o, round(q * 0.4, 8))
+        elif mode == "expired": o["status"] = "EXPIRED"
+        if p.get("newOrderRespType") == "RESULT": return self._public(o)
+        return dict(orderId=oid, symbol=o["symbol"], side=o["side"], status="NEW", executedQty="0", avgPrice="0.00000", origQty=o["origQty"])
+
+    def _exec(self, url, o, q):
+        self._cur_oid = o["orderId"]
+        try: done, px = self._fill(url, o["_p"], q)
+        finally: self._cur_oid = None
+        ex = float(o["executedQty"]); tot = ex + done
+        avg = (float(o["avgPrice"]) * ex + px * done) / tot if tot else 0.0
+        o.update(executedQty=str(round(tot, 8)), avgPrice=str(round(avg, 10)), _left=round(o["_left"] - done, 8))
+        o["status"] = "FILLED" if o["_left"] <= 1e-9 else "PARTIALLY_FILLED"
+
+    @staticmethod
+    def _public(o): return {k: v for k, v in o.items() if not k.startswith("_")}
+
+    def _fill(self, url, p, q):
+        """真的成交 q（部位與成交明細都改），回傳實際成交量與成交價。送單時的檢查（reduceOnly 被拒）也在這裡。"""
+        s, side = p["symbol"], p["side"]
         px = round(self.price * (1 + self.slip if side == "BUY" else 1 - self.slip), 10)   # 成交價 ≠ 標記價
         if self.hedge:
             ps = p["positionSide"]
@@ -204,8 +246,8 @@ class FakeBinance:
             if closing:
                 have = self.qty(s, ps)
                 if q > have + 1e-9: self._err(url, 400, '{"code":-2022,"msg":"ReduceOnly Order is rejected."}')
-                self._reduce(s, ps, q, px); return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
-            self._add(s, ps, q, px); return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
+                self._reduce(s, ps, q, px); return q, px
+            self._add(s, ps, q, px); return q, px
         # 單向
         L, S = self.qty(s, "LONG"), self.qty(s, "SHORT")
         net = L - S
@@ -214,15 +256,16 @@ class FakeBinance:
                 self._err(url, 400, '{"code":-2022,"msg":"ReduceOnly Order is rejected."}')
             q = min(q, abs(net))                              # 單向 reduceOnly 會被截到部位大小
             self._reduce(s, "LONG" if net > 0 else "SHORT", q, px)
-            return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
+            return q, px
         self._add(s, "LONG" if side == "BUY" else "SHORT", q, px)
-        return dict(status="FILLED", avgPrice=str(px), executedQty=str(q))
+        return q, px
 
     def _trade(self, s, side, q, px, pnl, pos_side):
         self.tid += 1
         self.trades.append(dict(id=self.tid, symbol=s, side=side, time=int(time.time() * 1000) + self.clock_offset_ms, qty=str(q), price=str(px),
                                 realizedPnl=str(round(pnl, 10)), commission=str(round(px * q * self.fee, 10)),
-                                positionSide=pos_side if self.hedge else "BOTH"))   # 真的幣安成交明細有這個欄位
+                                positionSide=pos_side if self.hedge else "BOTH",   # 真的幣安成交明細有這個欄位
+                                orderId=self._cur_oid))
 
     def _add(self, s, side, q, px):
         cur = self.pos.get((s, side), [0, px])

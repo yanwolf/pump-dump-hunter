@@ -44,6 +44,12 @@ def reconcile(force=False):
     - pending（送單結果不明）→ 交易所有這一側的部位就認領，數量與均價拿交易所的；沒有就等到 PENDING_TTL
     - 數量變少（在 App 手動減碼、或交易所端執行）→ 記一筆部分出場、通知、更新帳上數量
     回傳 (自己還在場的倉數, 交易所全部持倉)。"""
+    if not getattr(store, "LOADED", True):
+        # 持倉紀錄還沒載入：帳上是空的，拿它對帳會把交易所上的真實部位當成別人的、或當成已平倉——不動帳，講明（r38）
+        n = _loop_errs["未載入對帳"] = _loop_errs.get("未載入對帳", 0) + 1
+        if manager.nag(n): _say(lambda: f"⚠️ 持倉紀錄還沒載入（狀態檔讀取失敗），無法對帳（第 {n} 次）——交易所上的部位不會被認領或結帳，請處理狀態檔")
+        return 0, []
+    _loop_errs.pop("未載入對帳", None)
     if not force and time.time() - _rc["t"] < 20: return _rc["n"], _rc["ex"]   # 20 秒內重用，positionRisk 權重高，打太兇會被 418
     st = store.get()
     own, pend = dict(st.get("open", {})), dict(st.get("pending", {}))
@@ -148,6 +154,10 @@ def place(sym, eid, sig, sz, rec):
     """下單。順序：送單前寫 pending → 成交後立刻記帳 → 最後掛停損（清單第 3 條）。
     - 送單結果不明（逾時、5xx）→ 保留 pending 交給對帳；只有交易所明確拒絕才清掉（第 3 條 r12）
     - 成交後任何步驟丟例外都不能改寫「已成交」（第 8 條 r11）"""
+    if not getattr(store, "LOADED", True):
+        # 持倉紀錄還沒載入：開倉函式本身就擋（自動、手動都經過這裡，清單第 8 條 r38、r39）
+        rec["skipped"] = "持倉紀錄還沒載入（狀態檔讀取失敗），暫停開新倉"
+        return rec
     is_long = sig.side == "LONG"
     try: stop_px = float(B.round_price(sym, sig.stop))       # 實際掛出去的停損價（照 tickSize，第 4 條）
     except Exception: stop_px = sig.stop
@@ -176,6 +186,8 @@ def place(sym, eid, sig, sz, rec):
                           risk_usdt=round(sz["risk_usdt"] * k, 2))
             sz = dict(sz, leverage=lev); rec.update(leverage=lev, qty=sz["qty"], notional=sz["notional"])
         o = B.market_order(sym, "BUY" if is_long else "SELL", sz["qty"])
+        f = B.confirm_fill(sym, o)                              # 「成功」看 executedQty（清單第 15 條）
+        if not f["known"]: raise RuntimeError(f"成交狀態查不到（最後狀態 {f['status']}）")   # → 結果不明，保留 pending 交給對帳
     except Exception as e:
         if B.definite_reject(e):
             pend = dict(store.get().get("pending", {})); pend.pop(sym, None); store.update(pending=pend)
@@ -188,10 +200,15 @@ def place(sym, eid, sig, sz, rec):
             telegram.send(f"⏳ {sym} 引擎{eid} 送單結果不明（{str(e)[:80]}）— 可能已成交，下一輪對帳會確認並認領")
         return rec
 
+    if f["executed"] <= 0:                              # 交易所明確說沒成交（EXPIRED、撤單後成交 0）：直接丟 pending，不用等 3 分鐘
+        pend = dict(store.get().get("pending", {})); pend.pop(sym, None); store.update(pending=pend)
+        rec["skipped"] = f"市價單沒有成交（{f['status']}，成交 0）"
+        _say(lambda: f"ℹ️ {sym} 引擎{eid} 市價單沒有成交（{f['status']}，成交 0），不記帳", sym)
+        return rec
     rec["executed"] = True                              # 從這裡開始，任何例外都不能把這筆改成失敗
     try:
-        qty = float(o.get("executedQty") or 0) or float(B.round_qty(sym, sz["qty"]))
-        fill = float(o.get("avgPrice") or 0) or None
+        qty = f["executed"]                              # 交易所確認的成交量，不是送出的數量（部分成交時兩者不同）
+        fill = f["avg"]
         rec["fill"] = fill; rec["qty"] = qty
         rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
         own = dict(store.get().get("open", {}))
@@ -286,6 +303,7 @@ def _scan(state):
 
 def tick(state):
     """背景迴圈的一輪：掃描 → 對帳 → 出場管理與守衛 → 訊號與下單，四步各自 try。"""
+    if not getattr(store, "LOADED", True): _loop_step("載入狀態", store.retry_load)   # 讀取失敗後每輪重試（r38）
     _loop_step("掃描", lambda: _scan(state))
     if TRADE and C.API_KEY:
         _loop_step("對帳", lambda: reconcile(force=True))       # 先對帳（被停損掉的移除）
@@ -374,6 +392,7 @@ def manage(act, sym, eid="?", stop=None):
         _refresh()
         return dict(ok=True, msg=f"{sym} 已平倉" + (f" @ {r['exit']:.6g}，損益 {r['pnl']:+.2f} U" if r.get("exit") and r.get("pnl") is not None else ""))
     if act == "adopt":
+        if not getattr(store, "LOADED", True): return dict(error=f"{sym} 持倉紀錄還沒載入（狀態檔讀取失敗），不能認領——認領會把部位寫進還沒載入的帳")
         if mine: return dict(error=f"{sym} 已經在帳上，不需要認領")
         if not stop: return dict(error="請填停損價")
         stop = float(stop); is_long = side == "LONG"
@@ -410,6 +429,15 @@ def trade_action(act, sym, eid="?", stop=None):
                     store.update(open=own); note = "，已記為待平倉、每輪自動重試"
             except Exception as e2: manager._step_err(sym, "記待平倉", e2)
         return dict(error=f"{sym} 手動{act}出錯：{type(e).__name__}: {e}{note}")
+
+def set_live_form(form):
+    """網頁「套用到實盤」：先整批驗證，有一個欄位不合法就整批不存、不套用，回報是哪幾個（清單第 8 條 r41）。"""
+    ov, errs = params.validate(form)
+    if errs: return dict(error="參數不合法，整批沒有套用：" + "；".join(errs), fields=errs)
+    try: presets.set_live(form)
+    except presets.PresetsUnreadable as e: return dict(error=str(e))
+    presets.apply_live(); store.update(live_overrides=form)
+    return dict(ok=True)
 
 def norm_symbol(s):
     """AIN / ain / AINUSDT / ain/usdt 都變 AINUSDT；全是 U 本位。"""
@@ -475,12 +503,20 @@ class H(BaseHTTPRequestHandler):
             import urllib.parse
             q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
             act = q.get("act", [""])[0]; name = q.get("name", [""])[0]
-            try: form = json.loads(q.get("form", ["{}"])[0] or "{}")
-            except Exception: form = {}
+            try: form = json.loads(q.get("form", ["{}"])[0] or "{}"); bad = None if isinstance(form, dict) else "表單不是物件"
+            except Exception as e: form, bad = None, f"表單格式錯誤：{e}"
+            # 格式錯的表單不能當成空表單——空表單的意思是「清空所有實盤覆蓋」（清單第 8 條 r41：錯的輸入被當成別的東西、回報成功）
+            if bad and act in ("save", "live"): return json.dumps(dict(error=bad), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+            if act in ("save", "live"):
+                ov, errs = params.validate(form)
+                if errs: return json.dumps(dict(error="參數不合法，整批沒有存也沒有套用：" + "；".join(errs), fields=errs), ensure_ascii=False).encode(), "application/json; charset=utf-8"
             if act == "save" and name: presets.save_preset(name, form)
             elif act == "del" and name: presets.delete_preset(name)
             elif act == "live":
-                presets.set_live(form); presets.apply_live(); store.update(live_overrides=form)
+                r = set_live_form(form)
+                if r.get("error"):
+                    body = json.dumps(r, ensure_ascii=False).encode(); ct = "application/json; charset=utf-8"
+                    return body, ct
                 telegram.send(f"⚙️ 實盤參數覆蓋更新：{len(form)} 項" if form else "⚙️ 實盤參數覆蓋已清空，回到預設")
             body = json.dumps(dict(presets=presets.all_presets(), live=presets.live()), ensure_ascii=False).encode()
             ct = "application/json; charset=utf-8"
@@ -529,7 +565,7 @@ def run():
         if _p.get("live"): print("套用實盤參數覆蓋:", _p.get("live_name") or "自訂", _p["live"])
     except Exception as e:
         print("preset boot:", e); store.push("errors", f"{time.strftime('%m-%d %H:%M')} 開機套用參數失敗 {e}")
-    if store.LOAD_ERROR: telegram.send(f"🐞 {store.LOAD_ERROR}")   # 狀態檔讀取失敗：開機就講（r36）
+    # 狀態檔讀取失敗時，store 載入當下就照節奏推播了（r39），這裡不重複
     threading.Thread(target=loop, daemon=True).start()
     port = int(os.environ.get("PORT", "8080")); print("listening", port)
     ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()

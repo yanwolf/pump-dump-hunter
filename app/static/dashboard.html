@@ -190,7 +190,7 @@ async function pdel(){const n=$('psel').value;if(!n||!confirm('刪除組合 '+n+
 async function plive(){const f=pcollect();if(!Object.keys(f).length){alert('表單是空的');return}
  if(!confirm('把這 '+Object.keys(f).length+' 項套用到實盤？立即生效，重佈後仍有效。'))return;
  await pmeta('?act=live&form='+encodeURIComponent(JSON.stringify(f)));alert('已套用到實盤');load()}
-async function plivereset(){if(!confirm('實盤參數回到程式預設？'))return;await pmeta('?act=live&form=%7B%7D');alert('已回預設');load()}
+async function plivereset(){if(!confirm('實盤參數回到程式預設？'))return;await pmeta('?act=reset');alert('已回預設');load()}
 async function pform(){if(!PS.length)PS=await (await F('/api/params')).json();
  await pmeta();
  let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+=(h?'</div>':'')+'<div class=pgrp><h3>'+g+'</h3>'}

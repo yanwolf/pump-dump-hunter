@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-09-21r37"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
+VERSION = "2026-09-21r40"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):
@@ -51,6 +51,12 @@ def check(trade=False):
         want = C.SIZING["leverage"]
         add("槓桿上限", "ok" if (mx or 0) >= want else "warn", f"上限 {mx}x，策略要 {want}x")
     except Exception as e: add("槓桿上限", "warn", e)
+
+    # 推播設定：沒設的話所有告警都不會送出（清單第 8 條 r39）
+    from . import telegram as _tg
+    add("推播設定", "ok" if (_tg.TOKEN and _tg.CHAT) else "fail", "Telegram 已設定" if (_tg.TOKEN and _tg.CHAT) else "TG_TOKEN／TG_CHAT 沒設定，告警不會送出")
+    # 狀態檔（r38、r39）
+    add("狀態檔", "ok" if getattr(store, "LOADED", True) else "fail", "已載入" if getattr(store, "LOADED", True) else (store.LOAD_ERROR or "讀取失敗"))
 
     # 5. 速率限制：positionRisk 權重高，打太兇會 418
     pos = None

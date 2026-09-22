@@ -31,6 +31,16 @@ CASES = {
     "只寫到標準錯誤的 traceback 也會被全域檢查掃到": (
         'import traceback\nfx = fresh()\ntelegram.send("x")\ntry: {}["k"]\nexcept KeyError: traceback.print_exc()\n'
         'check("A", "正常", True)\nfinish()\n', 1, "沒有非注入的程式錯誤"),
+    "探針：往每一個模組層級狀態塞值，fresh() 之後全部消失（r45、r47）": (
+        'from tests.harness import RESET_STATE\nfx = fresh()\nfor m, a in RESET_STATE:\n'
+        '    v = getattr(m, a)\n'
+        '    if isinstance(v, dict): v["__探針__"] = 1\n'
+        '    elif isinstance(v, list): v.append("__探針__")\n'
+        '    elif isinstance(v, set): v.add("__探針__")\n'
+        'fx = fresh()\n'
+        'left = [f"{m.__name__}.{a}" for m, a in RESET_STATE if "__探針__" in getattr(m, a)]\n'
+        'print("探針數", len(RESET_STATE), "殘留", left)\ntelegram.send("x")\n'
+        'check("A", "全部消失", len(RESET_STATE) >= 10 and not left)\nfinish()\n', 0, "殘留 []"),
     "一般項目印這個情境的命中次數": (
         'fx = fresh()\nfx.mut_hits = 3\ntelegram.send("x")\ncheck("A", "一般", True)\nfinish()\n', 0, "一般〔命中3〕"),
 }

@@ -36,29 +36,43 @@ def cooling(sym, eid):
     return bool(t) and _now() - t < rules(eid)["cooldown_bars"] * TF_MS[tf_of(eid)]
 
 def trades_after(sym, pos):
-    """這個部位「已採用的最後一筆成交之後」的平倉方向成交（清單第 8 條 r30）。
-    - 界線用成交 id（pos["trade_mark"]），不用偵測當下的時間：前一段的成交時間戳可能跟偵測落在同一毫秒內，會被重複算進來。
-    - 平倉成交用方向判斷，不用 realizedPnl ≠ 0——打平出場的那筆 realizedPnl 就是 0。
-    - 有基準部位（同側有別人的倉）時，成交明細分不出哪幾筆是自己的 → 回 None（未知）。
-    - 查詢失敗 → 回 None（未知）；查到但沒有 → 回 []。"""
+    """這個部位「已採用的最後一筆成交之後」的平倉方向成交（清單第 8 條 r30～r36）。
+    - 有成交 id 界線（開倉成交後、認領當下、每次採用後記下的 trade_mark）：帶 fromId 往後查，**不再用時間篩**——
+      交易所時鐘比本機慢時，平倉成交的時間戳會早於帳上的開倉時間，用時間篩會被篩掉（r36）。
+      也不用「最近 N 筆」：持倉期間同幣成交一多，界線之後的平倉成交會掉出查詢範圍（r35）。
+    - 沒有 id 界線才退回用時間（開倉時間往後）；時間戳也無效 → 未知，不能退成 0 把歷史上的平倉算進來（r33～r35）。
+    - 平倉成交用方向判斷（不用 realizedPnl ≠ 0）；雙向模式比對 positionSide（r31、r34）。
+    - 有基準部位 → 未知；查詢失敗 → 未知（None）；查到但沒有 → []。"""
     if (num(pos.get("base_qty")) or 0) > 1e-9: return None
-    try: rows = B.user_trades(sym)
+    side, my_ps = ("SELL" if pos.get("side") == "LONG" else "BUY"), pos.get("side")
+    mark, since = num(pos.get("trade_mark")), num(pos.get("ts"))
+    try:
+        if mark is not None and mark > 0:
+            rows, frm = [], int(mark) + 1
+            for _ in range(20):                                   # 分頁：每頁最多 1000 筆
+                page = B.user_trades(sym, from_id=frm)
+                rows += page
+                if len(page) < 1000: break
+                frm = int(max(num(t.get("id")) or 0 for t in page)) + 1
+            keep = lambda t: (num(t.get("id")) or 0) > mark
+        elif since is not None and since > 0:
+            rows = B.user_trades(sym)
+            keep = lambda t: (num(t.get("time")) or 0) >= since
+        else:
+            _log(f"{sym} 沒有有效的成交界線（成交 id 與開倉時間都無效），出場價記未知")
+            return None
     except Exception as e: _log(f"{sym} 查成交明細失敗 {e}"); return None
-    side = "SELL" if pos.get("side") == "LONG" else "BUY"
-    since = num(pos.get("ts")) or 0
-    mark = num(pos.get("trade_mark")) or 0
-    my_ps = pos.get("side")
-    return [t for t in rows if t.get("side") == side and (num(t.get("time")) or 0) >= since and (num(t.get("id")) or 0) > mark
+    return [t for t in rows if t.get("side") == side and keep(t)
             # 雙向模式：成交明細有 positionSide，別人同幣反方向的開倉（方向同樣是 SELL/BUY）不是我的平倉（清單第 7 條）
             and t.get("positionSide", "BOTH") in ("BOTH", my_ps)]
 
 def mark_now(sym):
-    """成交明細目前最後一筆的 id——開倉成交之後、認領當下記下來當起始界線（清單第 8 條 r32）。
-    之後的平倉成交才算這筆的；開倉前幾秒同幣的平倉成交（上一筆、別的專案）不會被算進來。查不到回 None（退回用時間）。"""
+    """成交明細目前最後一筆的 id——開倉成交之後、認領當下記下來當起始界線（清單第 8 條 r32、r35）。
+    查不到、或查到的是空清單（剛成交完不該是空的）→ None，之後退回用時間。"""
     try:
         ids = [num(t.get("id")) for t in B.user_trades(sym)]
         ids = [i for i in ids if i is not None]
-        return max(ids) if ids else 0
+        return max(ids) if ids else None
     except Exception as e:
         _log(f"{sym} 記起始界線時查成交明細失敗 {e}"); return None
 
@@ -163,7 +177,10 @@ def close_now(sym, pos, by):
         if not qty: break                            # 查不到（None）或自己已經沒了（0）→ 不送單
         try:
             o = B.market_order(sym, close_side, qty, reduce_only=True)
-            px = float(o.get("avgPrice") or 0) or px
+            f = B.confirm_fill(sym, o)                           # 卡在 NEW 的單會被撤掉，不跟下一次的平倉單重疊（r43）
+            if f["executed"] > 0: px = f["avg"] or px
+            if 0 < f["executed"] < qty - 1e-9 or (f["executed"] > 0 and pos.get("close_partial") is None and attempt > 1):
+                pos["close_partial"] = True                      # 部分成交過：出場價要兩段加權，不能只用最後一張單（r43，跟著部位存檔）
         except Exception as e: err = e
         time.sleep(0.5)                              # 讓交易所的部位表跟上
         left = remaining(sym, side, base)
@@ -184,6 +201,7 @@ def close_now(sym, pos, by):
     was = pos.pop("close_fail", 0); pos.pop("want_close", None)
     # 交易所上已經平掉了——從這裡開始不能丟例外（清單第 8 條 r24）：算損益只用 .get()，缺欄位記為未知
     entry, q = num(pos.get("fill")), num(pos.get("qty"))   # 估算只用實際成交價；查不到就記未知，交給成交明細（r27）
+    if pos.get("close_partial"): px = None                  # 平倉分好幾段成交過：最後一張單的均價只代表後半段，估算不能用它（r43）
     parts = [num((x or {}).get("pnl")) for x in pos.get("partials", [])]
     try:
         # 任何一段損益未知 → 整筆未知（不能把未知那段當 0 加總，清單第 8 條 r27）
@@ -296,7 +314,7 @@ def ensure_stop(sym, pos):
         for extra in mine:                                # 只撤自己記錄在案的殘留
             if oid(extra) == pos["stop_id"]: continue
             try: B.cancel_order(sym, oid(extra), pos.get("stop_via")); _log(f"{sym} 撤掉殘留停損 {oid(extra)}")
-            except Exception: pass
+            except Exception as e: queue_leftover(sym, oid(extra), pos.get("stop_via"), e, why="移損後舊停損")   # 不能靜靜略過（r36）
         pos["stale_ids"] = [x for x in pos.get("stale_ids", []) if x[0] != pos["stop_id"] and x[0] in {oid(o) for o in stops}]
         return "present"
     n = _missing.get(sym, 0) + 1; _missing[sym] = n
@@ -349,7 +367,11 @@ def step(sym, pos):
             if R["tp1_r"] is not None and not pos.get("tp1") and r_now >= R["tp1_r"]:
                 half = float(B.round_qty(sym, pos["qty"] / 2))
                 o = B.market_order(sym, "SELL" if d > 0 else "BUY", half, reduce_only=True)
-                done = num(float(o.get("executedQty") or 0)) or half
+                f = B.confirm_fill(sym, o)                      # 成交 0 不能照樣把帳上數量減半（清單第 15 條）
+                done = f["executed"]
+                if not f["known"] or done <= 0:
+                    # 沒成交或查不到：帳不動。之後真的成交了，對帳會從部位減少偵測到、記成部分出場
+                    _log(f"{sym} 1R 減碼單沒有確認成交（{f['status']}，成交 {done}），帳上數量不變"); continue
                 pos["qty"] = round(pos["qty"] - done, 8); pos["tp1"] = True; pos["state"] = "已減碼"
                 try: adopt_partial(sym, pos, done)            # 1R 減碼也是一段出場：損益用實際成交（清單第 8 條 r30）
                 except Exception as e: _log(f"{sym} 記 1R 減碼損益失敗 {e}")

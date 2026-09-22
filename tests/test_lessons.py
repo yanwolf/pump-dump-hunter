@@ -110,7 +110,10 @@ def cancel(s, i, v=None):
 fake.stop_order = so; fake.cancel_order = cancel
 fake.open_stops = lambda s: (S["stops"], True); fake.user_trades = lambda s: []
 fake.round_qty = lambda s, q: f"{q:.0f}"
-fake.market_order = lambda *a, **k: {"avgPrice": "1"}
+fake.market_order = lambda *a, **k: {"avgPrice": "1", "executedQty": str(a[2]), "status": "FILLED"}
+# 成交確認（清單第 15 條，r43 新增）：簡化模擬照回應裡的成交量
+fake.confirm_fill = lambda s, o: dict(executed=float(o.get("executedQty") or 0), avg=float(o.get("avgPrice") or 0) or None,
+                                      status=o.get("status"), known=True)
 fake.klines = lambda *a, **k: []
 # 守衛補掛前會逐幣確認部位（清單第 8 條 r18 的延伸）；模擬環境要能回報，否則守衛停在確認那步、走不到補掛（清單用法第 5 點 r17）
 S["pos_qty"] = 100

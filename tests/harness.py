@@ -33,6 +33,25 @@ RESET_ATTRS = [(B, "klines"), (B, "_get"), (manager, "_now"), (manager, "retry_s
 RESET_ATTRS = [(m, a) for m, a in RESET_ATTRS if hasattr(m, a)]   # 在舊版程式上重跑測試時（清單用法第 5 點 r32），略過不存在的
 ORIG = {(id(m), a): getattr(m, a) for m, a in RESET_ATTRS}
 
+# 模組層級的可變狀態（計數器、快取、旗標）：匯入時存一份初始值，fresh() 一律還原（第 14 種）。
+# tests/check_tests.py 會比對 app/ 裡所有底線開頭的模組層級 dict／list／set，漏列就失敗——新增狀態不用靠記得（r44）。
+import copy as _copy
+from app import risk as _risk, signals as _signals, presets as _presets
+RESET_STATE = [(B, "_mode"), (B, "_algo"), (main, "_rc"), (main, "_loop_errs"), (main, "_fail"), (manager, "_missing"),
+               (manager, "_errs"), (preflight, "_last"), (_presets, "_fail"), (_risk, "_bal"), (_signals, "_state_b"),
+               (store, "_load_fail"), (store, "_fail"), (telegram, "_unset")]
+RESET_STATE = [(m, a) for m, a in RESET_STATE if hasattr(m, a)]      # 舊版程式上重跑時略過不存在的（r35）
+STATE0 = {(id(m), a): _copy.deepcopy(getattr(m, a)) for m, a in RESET_STATE}
+STATE_EXEMPT = {"store._state": "狀態本身；fresh() 逐欄位重設（store.update）"}
+
+def _restore_state():
+    for m, a in RESET_STATE:
+        cur, init = getattr(m, a), _copy.deepcopy(STATE0[(id(m), a)])
+        if isinstance(cur, dict): cur.clear(); cur.update(init)
+        elif isinstance(cur, list): cur[:] = init
+        elif isinstance(cur, set): cur.clear(); cur |= init
+        else: setattr(m, a, init)
+
 fails, ALL_ERR = [], []
 
 class _Tee:
@@ -68,8 +87,13 @@ def selftest_modules():
     from app import presets
     orig = presets.C.apply_overrides
     presets.C.apply_overrides = lambda ov: (_ for _ in ()).throw(RuntimeError("presets 自檢錯誤"))
-    presets.set_live({"SCAN.watch_chg24": 15}); presets.apply_live()
-    presets.C.apply_overrides = orig; presets.set_live({}); presets.apply_live()
+    try:
+        presets.set_live({"SCAN.watch_chg24": 15}); presets.apply_live()
+    except Exception: pass                                     # 金絲雀本身不能讓框架崩掉（例如參數集檔讀不到）
+    finally:
+        presets.C.apply_overrides = orig
+        try: presets.set_live({}); presets.apply_live()
+        except Exception: pass
     if any("presets 自檢錯誤" in x for x in store.get().get("errors", [])): got.add("presets")
     for mod, name in ((manager, "_errs"), (main, "_loop_errs")):          # 有才清（舊版程式上重跑，r35）
         if hasattr(mod, name): getattr(mod, name).clear()
@@ -97,6 +121,7 @@ def fresh(hedge=False, algo="ok"):
     if hasattr(B, "_algo"): B._algo.update(legacy_until=0.0)
     if hasattr(B, "_algo_ok"): B._algo_ok[0] = None           # r12 以前的永久旗標：在舊版程式上重跑時也要重設（第 14 種）
     for m, a in RESET_ATTRS: setattr(m, a, ORIG[(id(m), a)])
+    _restore_state()
     main._rc["t"] = 0
     for mod, name in ((manager, "_errs"), (main, "_loop_errs"), (manager, "_missing")):
         if hasattr(mod, name): getattr(mod, name).clear()
@@ -108,6 +133,11 @@ def fresh(hedge=False, algo="ok"):
         if hasattr(store, name): setattr(store, name, val)
     for name in ("_fail", "_load_fail"):
         if isinstance(getattr(store, name, None), dict): getattr(store, name).update(n=0)
+    # 參數集檔（r43 新增的讀取失敗計數）：同樣是模組層級狀態＋磁碟上的檔案，一起重設（第 14 種，r38：新增狀態的同一次就加進來）
+    from app import presets as _pr
+    if isinstance(getattr(_pr, "_fail", None), dict): _pr._fail.update(n=0, backed_up=False)
+    for f in os.listdir(d):
+        if f.startswith("presets.json"): os.remove(os.path.join(d, f))
     store.update(open={}, pending={}, closed=[], leftover={}, trades=[], signals=[], errors=[], exchange=[], cool={})
     TG.clear()
     return fx

@@ -26,6 +26,8 @@ tests/test_r30.py     清單 r28→r30 差異的行為測試（python -m tests.t
 tests/test_r33.py     清單 r31→r33 差異的行為測試（python -m tests.test_r33）
 tests/test_r36.py     清單 r34→r36 差異的行為測試（python -m tests.test_r36）
 tests/test_r39.py     清單 r37→r39 差異的行為測試（python -m tests.test_r39）
+tests/test_r43.py     清單 r40→r43 差異的行為測試（python -m tests.test_r43）
+tests/test_r47.py     清單 r44→r47 差異的行為測試（python -m tests.test_r47）
 tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版）；python -m tests.rerun_old legacy:rNN
 tests/check_indexing.py 先索引沒先確認的靜態檢查；--self-test 自我驗證
 tests/rerun_old.py    拿現在的測試跑舊版程式、失敗分三類：python -m tests.rerun_old <舊版目錄>

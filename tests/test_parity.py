@@ -9,8 +9,10 @@ fake.round_qty=lambda s,q: f"{q:.0f}"
 def klines(sym, tf, limit): return [b for b in S["bars"] if b["t"] <= S["now"]][-limit:]
 fake.klines=klines
 def mo(sym, side, qty, reduce_only=False):
-    S["orders"].append(("MKT",side,qty)); S["pos_qty"]-=float(qty); return dict(avgPrice=str(S["bars_cur"]["c"]))
+    S["orders"].append(("MKT",side,qty)); S["pos_qty"]-=float(qty); return dict(avgPrice=str(S["bars_cur"]["c"]), executedQty=str(qty), status="FILLED")
 fake.market_order=mo
+# 成交確認（清單第 15 條，r43 新增）：簡化模擬照回應裡的成交量
+fake.confirm_fill=lambda s, o: dict(executed=float(o.get("executedQty") or 0), avg=float(o.get("avgPrice") or 0) or None, status=o.get("status"), known=True)
 def so(sym, side, qty, px):
     S["sid"]+=1; S["stops"][S["sid"]]=px; return dict(orderId=S["sid"])
 fake.stop_order=so

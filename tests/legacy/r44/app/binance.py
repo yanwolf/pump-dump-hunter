@@ -135,9 +135,12 @@ def round_qty(symbol, qty):
 def round_price(symbol, price):
     return _fmt(price, filters(symbol)["tick"], down=False)
 
-def user_trades(symbol, limit=50):
-    """最近成交明細（含 realizedPnl、commission），平倉後拿實際出場價用。"""
-    return _get("/fapi/v1/userTrades", dict(symbol=symbol, limit=limit), signed=True)
+def user_trades(symbol, limit=1000, from_id=None):
+    """成交明細（含 realizedPnl、commission、positionSide）。帶 from_id 時從那一筆往後（清單第 8 條 r35：
+    不帶時只回最近 limit 筆，持倉期間成交一多，界線之後的平倉成交會掉出範圍）。"""
+    p = dict(symbol=symbol, limit=limit)
+    if from_id is not None: p["fromId"] = int(from_id)
+    return _get("/fapi/v1/userTrades", p, signed=True)
 
 # ---- 下單（testnet / live 由 USE_TESTNET 決定）----
 _mode = dict(hedge=None, t=0)
@@ -207,6 +210,39 @@ def _send_mode_safe(path, p, side, reduce_only):
 def market_order(symbol, side, qty, reduce_only=False):
     p = dict(symbol=symbol, side=side, type="MARKET", quantity=round_qty(symbol, qty), newOrderRespType="RESULT")   # RESULT 才有 avgPrice
     return _send_mode_safe("/fapi/v1/order", p, side, reduce_only)
+
+FINAL = ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH")
+
+def get_order(symbol, order_id):
+    return _get("/fapi/v1/order", dict(symbol=symbol, orderId=order_id), signed=True)
+
+def confirm_fill(symbol, o, tries=3, wait=0.3):
+    """市價單送出後確認成交（清單第 15 條）。回 dict(executed, avg, status, known)。
+    - 「成功」看 executedQty > 0，不是 HTTP 200；不是最終狀態就用單號查幾次
+    - 查了仍不是最終狀態 → **撤掉那張單**再查一次拿最終成交量（r43：放著不管，之後才成交的數量沒人知道）
+    - known=False：查不到最終狀態（查詢失敗）→ 呼叫端當成結果不明
+    - 均價缺漏：用單號在成交明細裡的成交算加權均價（實際成交價，不是估算）；查不到記 None"""
+    st = o.get("status"); ex = float(o.get("executedQty") or 0); avg = float(o.get("avgPrice") or 0) or None
+    oid = o.get("orderId")
+    if not (st == "FILLED" and ex > 0):
+        if oid is None: return dict(executed=ex, avg=avg, status=st, known=False)
+        for _ in range(tries):
+            if st in FINAL: break
+            time.sleep(wait)
+            try: q = get_order(symbol, oid); st, ex, avg = q.get("status"), float(q.get("executedQty") or 0), float(q.get("avgPrice") or 0) or None
+            except Exception: pass
+        if st not in FINAL:
+            try: cancel_order(symbol, oid, "legacy")
+            except Exception: pass                                   # 撤不掉（可能剛好成交了）→ 下面再查一次見分曉
+            try: q = get_order(symbol, oid); st, ex, avg = q.get("status"), float(q.get("executedQty") or 0), float(q.get("avgPrice") or 0) or None
+            except Exception: return dict(executed=ex, avg=avg, status=st, known=False)
+    if ex > 0 and not avg:
+        try:
+            tr = [t for t in user_trades(symbol) if str(t.get("orderId")) == str(oid)]
+            q = sum(float(t["qty"]) for t in tr)
+            avg = sum(float(t["price"]) * float(t["qty"]) for t in tr) / q if q else None
+        except Exception: avg = None
+    return dict(executed=ex, avg=avg, status=st, known=st in FINAL or (st == "FILLED"))
 
 def side_of(p):
     """positionRisk 一筆的方向。雙向模式看 positionSide，單向看數量正負。"""

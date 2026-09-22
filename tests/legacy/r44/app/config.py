@@ -132,14 +132,20 @@ RISK = dict(
 )
 
 def apply_overrides(o):
-    """回測/掃描用：以 dict 覆蓋參數，回傳還原用的快照。格式 {"ENGINE_A": {...}, "EXIT": {"A": {...}}, "RISK": {...}}"""
+    """回測/掃描/實盤覆蓋用：以 dict 覆蓋參數，回傳還原用的快照。格式 {"ENGINE_A": {...}, "EXIT": {"A": {...}}, "RISK": {...}}
+    先在副本上全部套用、格式都對，才一次換上（清單第 8 條 r39：一邊解析一邊套用，第二個欄位出錯時第一個已經換掉，參數停在半套）。"""
     import copy
-    snap = {k: copy.deepcopy(globals()[k]) for k in ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "ENGINE_F", "ENGINE_G", "EXIT", "RISK")}
+    keys = ("SCAN", "ENGINE_A", "ENGINE_B", "ENGINE_C", "ENGINE_D", "ENGINE_E", "ENGINE_F", "ENGINE_G", "EXIT", "RISK")
+    snap = {k: copy.deepcopy(globals()[k]) for k in keys}
+    new = copy.deepcopy(snap)
     for k, v in (o or {}).items():
-        if k not in snap or not isinstance(v, dict): continue
+        if k not in new or not isinstance(v, dict): continue
         if k == "EXIT":
-            for e, ev in v.items(): globals()[k].setdefault(e, {}).update(ev)
-        else: globals()[k].update(v)
+            for e, ev in v.items():
+                if not isinstance(ev, dict): raise TypeError(f"EXIT.{e} 應該是物件，收到 {type(ev).__name__}")
+                new[k].setdefault(e, {}).update(ev)
+        else: new[k].update(v)
+    for k in keys: globals()[k].clear(); globals()[k].update(new[k])      # 全部成功才一次換上
     return snap
 
 def restore(snap):
