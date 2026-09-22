@@ -176,6 +176,7 @@ def close_now(sym, pos, by):
     for attempt in (1, 2):
         if not qty: break                            # 查不到（None）或自己已經沒了（0）→ 不送單
         try:
+            qty = B.cap_market_qty(sym, qty)[0]            # 超過交易所市價單上限就分批：這次平上限那麼多，剩下的下一次／下一輪
             o = B.market_order(sym, close_side, qty, reduce_only=True)
             f = B.confirm_fill(sym, o)                           # 卡在 NEW 的單會被撤掉，不跟下一次的平倉單重疊（r43）
             if f["executed"] > 0: px = f["avg"] or px
@@ -434,6 +435,19 @@ def sweep_leftovers():
 
 _errs = {}               # (symbol, 步驟) → 連續出錯次數
 
+# 引擎鎖（清單第 8 條 r45 的執行緒版，r47）：對帳、出場管理、下單、網頁交易操作都要先拿到它才能動帳本。
+# 這些步驟一開始拿一份帳本副本、中間查交易所好幾秒、最後整份寫回；兩條執行緒交錯時，後寫的會把先寫的清掉——
+# 對帳期間手動平倉，已結帳的部位被寫回、同一筆結兩次帳；出場管理期間手動平倉失敗，「待平倉」被清掉。
+# 鎖加在函式本身（裝飾器），不是加在某一個呼叫端——不管誰呼叫都擋得到。可重入：同一條執行緒巢狀呼叫不會卡住。
+import functools, threading
+ENGINE_LOCK = threading.RLock()
+
+def engine_locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with ENGINE_LOCK: return fn(*a, **k)
+    return wrapper
+
 def _step_err(sym, stage, e):
     """守衛迴圈裡某個部位的某一步出錯：記錄並照節奏推播（清單第 8 條 r18、第 14 條：不能只進錯誤區）。"""
     k = (sym, stage); n = _errs[k] = _errs.get(k, 0) + 1
@@ -446,6 +460,7 @@ def _step_ok(sym, stage):
     n = _errs.pop((sym, stage), 0)
     if n >= 1: telegram.send(f"✅ {sym} {stage}已恢復（先前連續出錯 {n} 次）")
 
+@engine_locked
 def run():
     """每輪迴圈呼叫一次（在 reconcile 之後，已被交易所停損掉的倉不會進來）。"""
     try: sweep_leftovers(); _step_ok("*", "重撤殘留單")

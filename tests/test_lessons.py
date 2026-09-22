@@ -119,6 +119,9 @@ fake.klines = lambda *a, **k: []
 # 守衛補掛前會逐幣確認部位（清單第 8 條 r18 的延伸）；模擬環境要能回報，否則守衛停在確認那步、走不到補掛（清單用法第 5 點 r17）
 S["pos_qty"] = 100
 fake.side_qty = lambda s, side: S["pos_qty"]
+# 部位確認改用逐幣部位列（要比對均價，清單第 8 條 r53）：簡化模擬照樣回一列，均價 0（比不了 → 不當成換了一筆）
+fake.side_of = lambda p: "LONG" if float(p["positionAmt"]) > 0 else "SHORT"
+fake.position_rows = lambda s: [dict(symbol=s, positionSide="BOTH", positionAmt=str(S["pos_qty"]), entryPrice="0")] if S["pos_qty"] else []
 S["placed"] = 0
 _orig_so = so
 def so(*a):

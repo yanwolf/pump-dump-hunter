@@ -38,6 +38,7 @@ def _protect(sym, pos):
     except Exception as e:
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 認領後掛停損失敗 {e}"); return False
 
+@manager.engine_locked
 def reconcile(force=False):
     """跟交易所對帳：
     - 自己開的倉不在了 → 標記平倉
@@ -150,6 +151,7 @@ def reconcile(force=False):
     _rc.update(t=time.time(), n=len(still) + len(pend), ex=ex)
     return len(still) + len(pend), ex
 
+@manager.engine_locked
 def place(sym, eid, sig, sz, rec):
     """下單。順序：送單前寫 pending → 成交後立刻記帳 → 最後掛停損（清單第 3 條）。
     - 送單結果不明（逾時、5xx）→ 保留 pending 交給對帳；只有交易所明確拒絕才清掉（第 3 條 r12）
@@ -158,6 +160,15 @@ def place(sym, eid, sig, sz, rec):
         # 持倉紀錄還沒載入：開倉函式本身就擋（自動、手動都經過這裡，清單第 8 條 r38、r39）
         rec["skipped"] = "持倉紀錄還沒載入（狀態檔讀取失敗），暫停開新倉"
         return rec
+    # 拿到引擎鎖之後再檢查一次同一檔的狀態（清單第 8 條 r50：鎖只讓兩張單排隊，不會讓第二張不送）。
+    # 呼叫端在拿鎖之前也檢查過，但那時看到的可能是舊的——另一條剛好在開同一檔，等它做完、這條拿到鎖，那個判斷已經過期。
+    _own, _pend = store.get().get("open", {}), store.get().get("pending", {})
+    if sym in _own:
+        rec["skipped"] = f"這檔已有部位（引擎{_own[sym].get('engine')}），不重複開倉"; return rec
+    if sym in _pend:
+        rec["skipped"] = f"這檔已有一筆正在等確認的單（引擎{_pend[sym].get('engine')}），不重複開倉"; return rec
+    if len(_own) + len(_pend) >= C.SIZING["max_positions"]:
+        rec["skipped"] = f"本策略持倉已 {len(_own) + len(_pend)} 筆（含等確認），達上限"; return rec
     is_long = sig.side == "LONG"
     try: stop_px = float(B.round_price(sym, sig.stop))       # 實際掛出去的停損價（照 tickSize，第 4 條）
     except Exception: stop_px = sig.stop
@@ -185,6 +196,15 @@ def place(sym, eid, sig, sz, rec):
                 sz = dict(sz, qty=sz["qty"] * k, notional=round(sz["notional"] * k, 2),
                           risk_usdt=round(sz["risk_usdt"] * k, 2))
             sz = dict(sz, leverage=lev); rec.update(leverage=lev, qty=sz["qty"], notional=sz["notional"])
+        # 交易所對這檔市價單的數量上限：小幣價格低，同樣金額換成顆數很大，超過會被 -4005 拒絕、訊號就丟了。
+        # 壓到上限（部位變小、風險變小），並講明
+        q0 = sz["qty"]; qcap, capped, mx = B.cap_market_qty(sym, q0)
+        if capped:
+            k = qcap / q0
+            sz = dict(sz, qty=qcap, notional=round(sz["notional"] * k, 2), risk_usdt=round(sz["risk_usdt"] * k, 2))
+            rec.update(qty=qcap, notional=sz["notional"], capped=f"數量 {q0:g} 超過交易所市價單上限 {mx:g}，改下 {qcap:g}")
+            _say(lambda: f"ℹ️ {sym} 引擎{eid} 數量 {q0:g} 超過交易所市價單上限 {mx:g}，改下 {qcap:g}"
+                         f"（名目約 {sz['notional']:.0f} U、風險約 {sz['risk_usdt']:.2f} U，比原本小）", sym)
         o = B.market_order(sym, "BUY" if is_long else "SELL", sz["qty"])
         f = B.confirm_fill(sym, o)                              # 「成功」看 executedQty（清單第 15 條）
         if not f["known"]: raise RuntimeError(f"成交狀態查不到（最後狀態 {f['status']}）")   # → 結果不明，保留 pending 交給對帳
@@ -278,6 +298,8 @@ def run_tick(state):
     _loop_step("整輪", lambda: tick(state))
 
 _loop_errs = {}
+
+ENGINE_LOCK = manager.ENGINE_LOCK        # 引擎鎖在 manager（對帳、出場管理、下單都用裝飾器套上），網頁交易操作也拿這一把
 
 def _loop_step(name, fn):
     """背景迴圈的一步。每一步各自 try：前面一步出錯，後面的對帳、守衛照樣跑（清單第 8 條 r18）。
@@ -415,7 +437,10 @@ def trade_action(act, sym, eid="?", stop=None):
     沒有推播，使用者要平倉的意圖也沒留下。這裡接住：回錯誤給網頁、照節奏推播；平倉在結帳前出錯就記待平倉，
     之後每輪重試（manage 內容不動，只在外面包一層）。"""
     try:
-        r = manage(act, sym, eid, stop)
+        if not ENGINE_LOCK.acquire(timeout=30):              # 背景正在對帳或出場管理：等它做完，不交錯動帳本（r47）
+            return dict(error=f"{sym} 背景正在處理（對帳／出場管理），30 秒內沒有空檔，請稍後再試")
+        try: r = manage(act, sym, eid, stop)
+        finally: ENGINE_LOCK.release()
         manager._step_ok(sym, f"手動{act}")
         return r
     except Exception as e:
@@ -503,14 +528,20 @@ class H(BaseHTTPRequestHandler):
             import urllib.parse
             q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
             act = q.get("act", [""])[0]; name = q.get("name", [""])[0]
-            try: form = json.loads(q.get("form", ["{}"])[0] or "{}"); bad = None if isinstance(form, dict) else "表單不是物件"
+            raw_form = (q.get("form") or [""])[0]
+            try: form = json.loads(raw_form) if raw_form.strip() else None; bad = None if isinstance(form, dict) else "表單不是物件"
             except Exception as e: form, bad = None, f"表單格式錯誤：{e}"
+            # 一個要改的欄位都沒有：沒帶表單、空物件——不能當成「清空全部」（清單第 8 條 r47）。要回預設用明確的 act=reset
+            if not bad and not form: bad = "表單是空的（一個要改的欄位都沒有）；要回預設請用「實盤回預設」"
             # 格式錯的表單不能當成空表單——空表單的意思是「清空所有實盤覆蓋」（清單第 8 條 r41：錯的輸入被當成別的東西、回報成功）
             if bad and act in ("save", "live"): return json.dumps(dict(error=bad), ensure_ascii=False).encode(), "application/json; charset=utf-8"
             if act in ("save", "live"):
                 ov, errs = params.validate(form)
                 if errs: return json.dumps(dict(error="參數不合法，整批沒有存也沒有套用：" + "；".join(errs), fields=errs), ensure_ascii=False).encode(), "application/json; charset=utf-8"
-            if act == "save" and name: presets.save_preset(name, form)
+            if act == "reset":                                   # 明確的「實盤回預設」（以前是送空表單，r47）
+                presets.set_live({}); presets.apply_live(); store.update(live_overrides={})
+                telegram.send("⚙️ 實盤參數覆蓋已清空，回到預設")
+            elif act == "save" and name: presets.save_preset(name, form)
             elif act == "del" and name: presets.delete_preset(name)
             elif act == "live":
                 r = set_live_form(form)

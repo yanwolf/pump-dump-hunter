@@ -121,7 +121,8 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
  $('hstats').innerHTML=[
    ['持倉',Object.keys(s.open||{}).length],['擁擠',s.watch.length],['觀察',s.observe.length],
    ['訊號',s.signals.length],['已下單',s.trades.length],
-   ['可用',e.tier?Math.round(e.tier*(1-e.reserve_pct))+' U':'—']
+   ['錢包',e.balance!=null?Math.round(e.balance).toLocaleString()+' U':(e.error?'<span style=color:var(--gold)>讀不到</span>':'—')],
+   [e.tier?`可用（階梯 ${Math.round(e.tier)} × ${Math.round((1-e.reserve_pct)*100)}%）`:'可用',e.tier?Math.round(e.tier*(1-e.reserve_pct))+' U':'—']
  ].map(([k,v])=>`<span class=stat>${k}<b>${v}</b></span>`).join('');
  const hits=r=>r.hits||'';
  const wcols=['symbol','score','hits','chg24','gain48','ma20_dev','oi_growth','funding','vol24'];
@@ -190,7 +191,7 @@ async function pdel(){const n=$('psel').value;if(!n||!confirm('刪除組合 '+n+
 async function plive(){const f=pcollect();if(!Object.keys(f).length){alert('表單是空的');return}
  if(!confirm('把這 '+Object.keys(f).length+' 項套用到實盤？立即生效，重佈後仍有效。'))return;
  await pmeta('?act=live&form='+encodeURIComponent(JSON.stringify(f)));alert('已套用到實盤');load()}
-async function plivereset(){if(!confirm('實盤參數回到程式預設？'))return;await pmeta('?act=live&form=%7B%7D');alert('已回預設');load()}
+async function plivereset(){if(!confirm('實盤參數回到程式預設？'))return;await pmeta('?act=reset');alert('已回預設');load()}
 async function pform(){if(!PS.length)PS=await (await F('/api/params')).json();
  await pmeta();
  let g='',h='';for(const s of PS){if(s.g!=g){g=s.g;h+=(h?'</div>':'')+'<div class=pgrp><h3>'+g+'</h3>'}
