@@ -49,7 +49,7 @@ tests/mutation_check.py 突變檢查（逐項）：逐幣查詢回空；命中 0
 tests/check_tests.py  測試的靜態檢查：fresh() 重設換掉的東西、否定句斷言要有前提（python -m tests.check_tests）
 tests/fake_exchange.py 模擬幣安（HTTP 層）：舊端點條件單 -4120、空單負數、雙向兩列、逐幣查部位、無 Algo 環境，
                       可注入逾時／5xx／200 空清單／成交但回應丟失
-scripts/patch.py      改程式用的字串取代：必須恰好命中 N 次，否則中止（清單第 14 條 r15）
+scripts/patch.py      改程式用的字串取代 apply()：整批比對、compile＋pyflakes 都過才寫入；中止後只重跑一部分會擋下（待重跑批次在 scripts/.patch_pending.json）；自我驗證 python -m scripts.patch
 部署前：所有 tests.test_* 都要過、python -m tests.check_tests 通過、python -m tests.mutation_selftest 通過、python -m tests.mutation_check 通過、python -m pyflakes app/ 沒有 undefined name
 BINANCE_LESSONS.md   三專案共用的踩坑清單
 ```

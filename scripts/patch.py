@@ -10,7 +10,21 @@ import hashlib, json, os, re, sys
 class PatchAbort(SystemExit):
     pass
 
-ABORT_FILE = os.path.join(os.environ.get("TMPDIR", "/tmp"), ".pdh_patch_abort.json")
+ABORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".patch_pending.json")   # 專案內（r67：/tmp 會跟別的專案共用）
+
+def clear_pending():
+    """忘掉上一次中止的批次。自我驗證裡故意中止的案例之後要呼叫，否則擋到後面的案例（清單用法第 5 點 r66）。"""
+    try: os.remove(ABORT_FILE) if os.path.exists(ABORT_FILE) else None
+    except Exception: pass
+
+def _undefined_names(src, path):
+    """pyflakes 的「undefined name」：compile() 只抓語法，抓不到用了沒匯入的名稱（清單用法第 5 點 r66：改寫工具改完自己就崩）。
+    pyflakes 沒裝 → 回 None（呼叫端印警告、不擋）。"""
+    try:
+        import io, pyflakes.api, pyflakes.reporter
+    except ImportError: return None
+    out = io.StringIO(); pyflakes.api.check(src, path, pyflakes.reporter.Reporter(out, out))
+    return [l for l in out.getvalue().splitlines() if "undefined name" in l]
 
 def _fp(e): return hashlib.sha1((e[0] + "\x00" + e[2]).encode("utf-8")).hexdigest()   # 指紋看（路徑, 新字串）：改錨點重跑時新字串不變，才對得上
 
@@ -59,20 +73,28 @@ def apply(edits):
             try: compile(s, path, "exec")
             except SyntaxError as e:
                 _abort(edits, f"❌ apply 中止（一個檔都沒寫）：{path} 改完後有語法錯（第 {e.lineno} 行：{e.msg}）")
+            undef = _undefined_names(s, path)          # 再跑 pyflakes（r66、r67）：用了沒匯入的名稱，編譯過得了、執行才崩
+            if undef is None: print(f"⚠️ pyflakes 沒裝，{path} 改完後沒有檢查未定義名稱")
+            elif undef: _abort(edits, f"❌ apply 中止（一個檔都沒寫）：{path} 改完後有未定義的名稱（pyflakes）：" + "；".join(undef[:3]))
     for path, s in buf.items(): open(path, "w", encoding="utf-8").write(s)
-    try: os.remove(ABORT_FILE) if os.path.exists(ABORT_FILE) else None      # 整批成功寫入 → 忘掉上一次的中止
-    except Exception: pass
+    clear_pending()                                 # 整批成功寫入 → 忘掉上一次的中止
     return len(edits)
 
 def self_test():
-    """故意讓第二處比對不到，確認第一處的檔案沒被改動。"""
-    import os, tempfile
+    """人造檔案上驗證每一種擋法。待重跑批次改指到暫存目錄（不碰真的那份，r67）；故意中止的案例之後清掉，不擋到後面的案例（r66）。"""
+    global ABORT_FILE
+    import tempfile
     d = tempfile.mkdtemp(); a, b = os.path.join(d, "a.txt"), os.path.join(d, "b.txt")
     open(a, "w").write("甲乙丙\n"); open(b, "w").write("丁戊\n")
     results = []
+    real_pending, ABORT_FILE = ABORT_FILE, os.path.join(d, "pending.json")
+    real_exists = os.path.exists(real_pending)
     try: apply([(a, "甲", "一"), (b, "不存在", "x")]); results.append(("第二處對不到 → 中止", False))
     except PatchAbort: results.append(("第二處對不到 → 中止", True))
     results.append(("中止後第一個檔沒被改動", open(a).read() == "甲乙丙\n"))
+    results.append(("故意中止留下待重跑批次（寫在自我驗證的暫存目錄，不是真的那份）", os.path.exists(ABORT_FILE) and os.path.exists(real_pending) == real_exists))
+    clear_pending()                                  # 故意中止的案例之後清掉，不擋到後面的案例（r66）
+    results.append(("clear_pending() 之後待重跑批次消失", not os.path.exists(ABORT_FILE)))
     try: apply([(a, "乙丙\n", "二三")]); results.append(("結尾換行不一致 → 中止", False))
     except PatchAbort: results.append(("結尾換行不一致 → 中止", True))
     try: apply([(a, "甲", "一"), (a, "一乙", "一二"), (b, "丁", "四")]); results.append(("同檔依序套用、跨檔一次寫入", open(a).read() == "一二丙\n" and open(b).read() == "四戊\n"))
@@ -83,6 +105,11 @@ def self_test():
     open(pa, "w").write("x = 1\n"); open(pb, "w").write("y = 2\n")
     try: apply([(pa, "x = 1", "x = 2"), (pb, "y = 2", "y = (2")]); results.append(("改完有語法錯 → 中止", False))
     except PatchAbort: results.append(("改完有語法錯 → 中止", True))
+    clear_pending()
+    try: apply([(pa, "x = 1", "x = os.getcwd()")]); results.append(("改完用了沒匯入的名稱（pyflakes）→ 中止", False))
+    except PatchAbort as e: results.append(("改完用了沒匯入的名稱（pyflakes）→ 中止", "未定義的名稱" in str(e)))
+    results.append(("pyflakes 中止後檔案沒被改動", open(pa).read() == "x = 1\n"))
+    clear_pending()
     results.append(("語法錯中止後，另一個 .py 也沒被改動", open(pa).read() == "x = 1\n" and open(pb).read() == "y = 2\n"))
     pd = os.path.join(d, "deco.py")
     open(pd, "w").write("@property\ndef is_enabled(self):\n    return True\n")
@@ -103,6 +130,7 @@ def self_test():
     open(b, "w").write("第一行\n要刪的一行\n第三行\n")
     try: apply([(b, "要刪的一行\n", "")]); results.append(("整段刪除（換成空字串）不被換行檢查擋下", open(b).read() == "第一行\n第三行\n"))
     except PatchAbort as e: results.append((f"整段刪除（換成空字串）不被換行檢查擋下（{e}）", False))
+    ABORT_FILE = real_pending                        # 還原成真的那份（自我驗證期間指到暫存目錄）
     bad = 0
     for name, ok in results: print(f"  {'✅' if ok else '❌'} {name}"); bad += not ok
     return bad
