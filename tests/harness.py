@@ -29,7 +29,7 @@ manager.telegram.send = telegram.send; main.telegram.send = telegram.send
 # 情境會換掉的模組層級物件：fresh() 一律還原（第 14 種）。新增要換的東西時加在這裡，tests/check_tests.py 也看這份清單
 RESET_ATTRS = [(B, "klines"), (B, "_get"), (manager, "_now"), (manager, "retry_stop"), (manager, "record_close"),
                (manager, "close_now"), (main.scanner, "scan"), (main, "reconcile"), (main, "tick"), (store, "push"),
-               (json, "dump")]                   # 全域的 json 模組：換掉它會影響所有模組，更要還原
+               (json, "dump"), (manager, "_start_backfill"), (B, "LOG"), (B, "user_trades")]                   # 全域的 json 模組：換掉它會影響所有模組，更要還原
 RESET_ATTRS = [(m, a) for m, a in RESET_ATTRS if hasattr(m, a)]   # 在舊版程式上重跑測試時（清單用法第 5 點 r32），略過不存在的
 ORIG = {(id(m), a): getattr(m, a) for m, a in RESET_ATTRS}
 

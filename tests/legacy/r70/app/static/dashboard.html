@@ -101,6 +101,39 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
 const F=u=>fetch(u,{headers:{'X-PDH':'1'}});
 const $=id=>document.getElementById(id);
 const num=v=>typeof v==='number'?v:null;
+function PERF(st){
+ // 績效統計：依引擎、R 為核心（C 每筆風險 2%、F／G 1%，U 不能跨引擎比）、依幣種、實際滑價、參數版本
+ if(!st) return '';
+ if(st.error) return `<div class=card><h2>績效統計</h2><div class=meta>算不出來：${st.error}</div></div>`;
+ const E=st.engines||{}, names=Object.keys(E);
+ if(!st.scope||!st.scope.n) return '<div class=card><h2>績效統計</h2><div class=empty>（還沒有已平倉交易）</div></div>';
+ const f=(v,d=2,suf='')=>v===null||v===undefined?'—':(typeof v==='number'?v.toFixed(d)+suf:v);
+ const c=(v,d=2,suf='')=>v===null||v===undefined?'—':`<span class=${v>0?'pos':v<0?'neg':''}>${v>0?'+':''}${v.toFixed(d)}${suf}</span>`;
+ const sl=(v)=>v===null||v===undefined?'—':`<span class=${v>0?'neg':v<0?'pos':''}>${v>0?'+':''}${v.toFixed(3)}%</span>`;   // 滑價正數＝不利
+ const lab=e=>e==='全部'?'<b>全部</b>':({C:'C 崩盤追空',F:'F 清算追空',G:'G 軋空追多'}[e]||e);
+ const tb=(head,rows)=>'<div class=scroll><table><tr>'+head.map(h=>'<th>'+h).join('')+'</tr>'+rows.map(r=>'<tr>'+r.map(x=>'<td>'+x).join('')+'</tr>').join('')+'</table></div>';
+ const main=tb(['引擎','筆數','勝率','期望值','平均賺','平均賠','獲利因子','累計','最大回撤','最長連敗','損益 U','未知'],
+   names.map(e=>{const s=E[e];return [lab(e),s.total,s.win_rate==null?'—':s.win_rate+'%',c(s.expectancy_r,2,'R'),c(s.avg_win_r,2,'R'),c(s.avg_loss_r,2,'R'),
+     f(s.profit_factor),c(s.total_r,2,'R'),s.max_dd_r==null?'—':(s.max_dd_r?`<span title="${s.dd_from||''} → ${s.dd_to||''}">${f(s.max_dd_r,2,'R')}</span>`:'0R'),s.max_losing_streak,c(s.pnl),s.unknown||'']}));
+ const slip=tb(['引擎','進場滑價 平均','最大','筆數','停損出場滑價 平均','最大','筆數','離停損價遠（不計）'],
+   names.map(e=>{const s=E[e];return [lab(e),sl(s.slip_entry_avg),sl(s.slip_entry_max),s.slip_entry_n,sl(s.slip_stop_avg),sl(s.slip_stop_max),s.slip_stop_n,s.slip_stop_far||'']}));
+ const rs=Object.keys((E['全部']||{}).reasons||{});
+ const why=tb(['引擎'].concat(rs), names.map(e=>[lab(e)].concat(rs.map(r=>(E[e].reasons||{})[r]||'')))) ;
+ const ver=tb(['參數版本','引擎','筆數','勝率','期望值','累計','損益 U','未知'],
+   (st.versions||[]).map(v=>[v.version,lab(v.engine),v.total,v.win_rate==null?'—':v.win_rate+'%',c(v.expectancy_r,2,'R'),c(v.total_r,2,'R'),c(v.pnl),v.unknown||'']));
+ const sy=st.symbols||[], worst=sy.filter(x=>x.total_r!=null&&x.total_r<0).slice(0,8), best=sy.filter(x=>x.total_r!=null&&x.total_r>0).slice(-8).reverse();
+ const srow=x=>[x.symbol,x.engines,x.total,x.win_rate==null?'—':x.win_rate+'%',c(x.total_r,2,'R'),c(x.pnl),x.unknown||''];
+ const syh=['幣','引擎','筆數','勝率','累計','損益 U','未知'];
+ return `<div class=card><h2>績效統計 <span class=meta>最近 ${st.scope.n} 筆（${st.scope.first} ～ ${st.scope.last}；帳上保留最近 ${st.scope.kept} 筆）</span></h2>
+  <div class=meta style=margin-bottom:6px>以 R 為核心：C 每筆風險 2%、F／G 1%，同樣的 U 在不同引擎意義不同。期望值＝平均 R；獲利因子＝總賺 R ÷ 總賠 R；最大回撤＝累計 R 從高點回落最多的一段（游標停在上面看起訖）。損益未知的不算輸贏、不當 0。</div>
+  ${main}
+  <h3 class=meta style="margin:12px 0 4px">參數版本 × 引擎（每筆開倉時記下當下的實盤參數；沒有記錄的是「舊版（未記錄）」）</h3>${ver}
+  <h3 class=meta style="margin:12px 0 4px">實際滑價（正數＝對我們不利；回測假設 0.3%。「停損單」包含在 App 手動平倉，成交價離停損價超過 2% 的不像停損成交，另列不計）</h3>${slip}
+  <h3 class=meta style="margin:12px 0 4px">出場原因</h3>${why}
+  <h3 class=meta style="margin:12px 0 4px">虧最多的幣</h3>${worst.length?tb(syh,worst.map(srow)):'<div class=empty>（無）</div>'}
+  <h3 class=meta style="margin:12px 0 4px">賺最多的幣</h3>${best.length?tb(syh,best.map(srow)):'<div class=empty>（無）</div>'}
+ </div>`;
+}
 function T(rows,cols,cls){if(!rows||!rows.length)return '<div class=empty>（無）</div>';
  return '<div class=scroll><table><tr>'+cols.map(c=>'<th>'+c).join('')+'</tr>'+
  rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v===undefined||v===null)v='';
@@ -141,7 +174,7 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
  $('mx').innerHTML='<option value="">— 選幣 —</option>'+ex.map(p=>`<option value="${p.symbol}">${p.symbol}（${p.owner}·${p.amt>0?'多':'空'}）</option>`).join('')+
    (cur&&!ex.some(p=>p.symbol===cur)?`<option value="${cur}">${cur}（已不在帳號）</option>`:'');
  $('mx').value=cur;
- $('t_rest').innerHTML=`
+ $('t_rest').innerHTML=PERF(s.stats)+`
  <div class=card><h2>已平倉 · 最新在上${(s.closed||[]).some(x=>x.pnl==null)?` <span class=meta>（其中 ${(s.closed||[]).filter(x=>x.pnl==null).length} 筆損益未知，不算進任何加總）</span>`:''}</h2>${T((s.closed||[]).slice().reverse().slice(0,30).map(x=>x.pnl==null?{...x,pnl:'未知'}:x),['closed','symbol','engine','side','fill','exit','pnl','r','qty','by'])}</div>
  <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
    ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','stop_error','reason'])}</div>`}

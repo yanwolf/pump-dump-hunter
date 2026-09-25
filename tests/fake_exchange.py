@@ -55,6 +55,11 @@ class FakeBinance:
         self.orders = {}                 # 市價單：orderId → 訂單（查單、撤單用）
         self.market_max = {}             # 幣 → 市價單最大數量（MARKET_LOT_SIZE.maxQty）；沒設 = 1,000,000
         self.fill_mode = None            # 成交情境：callable(p) → filled／later／never／partial／expired（None = 立刻成交）
+        self.strip_avg = None            # callable(p) → True 時，回應不帶 avgPrice／cumQuote（r71）
+        self.strip_query = False         # True 時查單也不帶（「查了也沒有」的情境）
+        self.hide_fills = False          # True 時之後成交的單，成交明細先看不到（trades_visible[單號] = 0）
+        self.trades_visible = {}         # 單號 → 看得到的比例（0 看不到、0.4 只看到四成、1 全部）；測試在「背景等待過後」才調成 1
+        self.hide_frac = 0.0             # hide_fills 時，新成交的單先看得到幾成
         self._cur_oid = None                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
         self.trade_queries = []          # 每次查成交明細：{symbol, untraced}（清單用法第 5 點 r33：歸零不留成交）
         self.mut_hits = 0                # 突變命中次數（被突變的查詢在這個情境被呼叫了幾次）
@@ -157,6 +162,14 @@ class FakeBinance:
         if path == "/fapi/v1/userTrades":
             self.trade_queries.append(dict(symbol=p.get("symbol"), untraced=self.untraced(p.get("symbol"))))
             rows = [t for t in self.trades if t["symbol"] == p.get("symbol")]
+            # 成交明細是非同步寫入的（r71）：還看不到的單號整筆拿掉、只看得到一部分的照比例縮小數量
+            vis = []
+            for t in rows:
+                f = self.trades_visible.get(t.get("orderId"), 1.0)
+                if f <= 0: continue
+                if f < 1: t = dict(t, qty=str(float(t["qty"]) * f), realizedPnl=str(float(t["realizedPnl"]) * f), commission=str(float(t["commission"]) * f))
+                vis.append(t)
+            rows = vis
             limit = min(int(p.get("limit", 500)), 1000)             # 真的幣安：預設 500、最多 1000 筆
             if "fromId" in p: return [t for t in rows if t["id"] >= int(p["fromId"])][:limit]   # 帶 fromId：從那筆往後
             return rows[-limit:]                                     # 不帶：最近 limit 筆
@@ -183,7 +196,7 @@ class FakeBinance:
                 o = self.orders.get(oid)
                 if not o: self._err(url, 400, '{"code":-2013,"msg":"Order does not exist."}')
                 if o["_mode"] == "later" and o["status"] == "NEW": self._exec(url, o, o["_left"])
-                return self._public(o)
+                return self._strip(o, self._public(o)) if self.strip_query else self._public(o)
             if method == "DELETE":
                 if oid in self.legacy_orders: return self.legacy_orders.pop(oid)
                 o = self.orders.get(oid)
@@ -226,7 +239,7 @@ class FakeBinance:
         if mode == "filled": self._exec(url, o, q)
         elif mode == "partial": self._exec(url, o, round(q * 0.4, 8))
         elif mode == "expired": o["status"] = "EXPIRED"
-        if p.get("newOrderRespType") == "RESULT": return self._public(o)
+        if p.get("newOrderRespType") == "RESULT": return self._strip(o, self._public(o))
         return dict(orderId=oid, symbol=o["symbol"], side=o["side"], status="NEW", executedQty="0", avgPrice="0.00000", origQty=o["origQty"])
 
     def _exec(self, url, o, q):
@@ -235,11 +248,19 @@ class FakeBinance:
         finally: self._cur_oid = None
         ex = float(o["executedQty"]); tot = ex + done
         avg = (float(o["avgPrice"]) * ex + px * done) / tot if tot else 0.0
-        o.update(executedQty=str(round(tot, 8)), avgPrice=str(round(avg, 10)), _left=round(o["_left"] - done, 8))
+        o.update(executedQty=str(round(tot, 8)), avgPrice=str(round(avg, 10)), _left=round(o["_left"] - done, 8),
+                 cumQuote=str(round(float(o.get("cumQuote") or 0) + px * done, 10)))       # 成交額照實累計（以前一直是 "0"，退化值）
+        if self.hide_fills: self.trades_visible.setdefault(o["orderId"], self.hide_frac)    # 這張單的成交明細先看不到／只看得到幾成（r71）
         o["status"] = "FILLED" if o["_left"] <= 1e-9 else "PARTIALLY_FILLED"
 
     @staticmethod
     def _public(o): return {k: v for k, v in o.items() if not k.startswith("_")}
+
+    def _strip(self, o, d):
+        """回應不帶均價與成交額——欄位整個不存在（不是 "0"），照 2026-09-25 gold-scalper 實單的原始回應（清單第 15 條 r71）。"""
+        if callable(self.strip_avg) and self.strip_avg(o["_p"]):
+            d = {k: v for k, v in d.items() if k not in ("avgPrice", "cumQuote")}
+        return d
 
     def _fill(self, url, p, q):
         """真的成交 q（部位與成交明細都改），回傳實際成交量與成交價。送單時的檢查（reduceOnly 被拒）也在這裡。"""
