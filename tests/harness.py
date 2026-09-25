@@ -44,6 +44,8 @@ RESET_STATE = [(m, a) for m, a in RESET_STATE if hasattr(m, a)]      # 舊版程
 STATE0 = {(id(m), a): _copy.deepcopy(getattr(m, a)) for m, a in RESET_STATE}
 STATE_EXEMPT = {"store._state": "狀態本身；fresh() 逐欄位重設（store.update）"}
 
+BACKFILL_JOBS = []                        # 背景補登收下來的工作（fresh() 清空）
+
 def _restore_state():
     for m, a in RESET_STATE:
         cur, init = getattr(m, a), _copy.deepcopy(STATE0[(id(m), a)])
@@ -122,6 +124,10 @@ def fresh(hedge=False, algo="ok"):
     if hasattr(B, "_algo_ok"): B._algo_ok[0] = None           # r12 以前的永久旗標：在舊版程式上重跑時也要重設（第 14 種）
     for m, a in RESET_ATTRS: setattr(m, a, ORIG[(id(m), a)])
     _restore_state()
+    # 背景補登的執行緒在測試裡不真的開（清單第 15 條 r71）：預設收下來不跑，需要跑的測試自己從 BACKFILL_JOBS 拿出來跑。
+    # 以前只在新測試裡換掉，舊測試的背景執行緒真的跑起來、把「未知」補成已知，舊測試的預期就被打破了（r73）
+    BACKFILL_JOBS.clear()
+    if hasattr(manager, "_start_backfill"): manager._start_backfill = BACKFILL_JOBS.append
     main._rc["t"] = 0
     for mod, name in ((manager, "_errs"), (main, "_loop_errs"), (manager, "_missing")):
         if hasattr(mod, name): getattr(mod, name).clear()

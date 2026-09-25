@@ -2,10 +2,10 @@
 import os, time
 os.environ["TZ"] = os.environ.get("APP_TZ", "CST-8")   # 台灣 UTC+8、無夏令時間；POSIX 寫法不需要 tzdata
 time.tzset()
-import base64, hmac, json, threading, traceback, uuid
+import base64, hashlib, hmac, json, threading, traceback, uuid
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from . import backtest, binance as B, config as C, manager, params, presets, preflight, risk, scanner, store, sweep, telegram
+from . import backtest, binance as B, config as C, manager, params, presets, preflight, risk, scanner, stats, store, sweep, telegram
 from .signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
@@ -15,6 +15,18 @@ PASSWORD = os.environ.get("DASH_PASSWORD", "")                        # 網頁�
 SCAN_SEC = int(os.environ.get("SCAN_SEC", "1800")); POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 
 _rc = dict(t=0, n=0, ex=[])
+
+def _param_version():
+    """開倉當下的實盤參數版本——績效依版本分開比較用（照 crypto-screener 的做法）。
+    版本＝實盤覆蓋內容的雜湊：同一組參數永遠同一個版本；沒有覆蓋是「預設參數」；參數集讀不到就記未知，不猜。"""
+    try: d = presets.all()
+    except Exception: d = {"unreadable": True}
+    if d.get("unreadable"): return dict(ver=None, ver_label="未知（參數集讀不到）")
+    live = d.get("live") or {}
+    if not live: return dict(ver="default", ver_label="預設參數")
+    h = hashlib.sha1(json.dumps(live, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:6]
+    name = d.get("live_name")
+    return dict(ver=h, ver_label=f"{name}（{h}）" if name else f"自訂 {h}")
 
 def _say(build, who="*"):
     """發通知是獨立的一步（清單第 8 條 r21）：組字串或送出出錯，不能中斷前面已經做完的動作（例如已經結帳、撤停損），
@@ -76,7 +88,7 @@ def reconcile(force=False):
                     fill = round((avg * (mine + base) - rec["base_px"] * base) / mine, 10)
                 else: fill = avg
                 stop = rec["stop"]
-                pos = dict(pid=uuid.uuid4().hex[:12], engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=(rec["ts"] if manager.num(rec.get("ts")) is not None else now_ms),   # 值是 None 時 .get 的預設擋不住（r33）
+                pos = dict(pid=uuid.uuid4().hex[:12], **_param_version(), engine=rec.get("engine"), side=rec["side"], time=rec.get("time"), ts=(rec["ts"] if manager.num(rec.get("ts")) is not None else now_ms),   # 值是 None 時 .get 的預設擋不住（r33）
                            bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), entry=rec["entry"], fill=fill, stop=stop, qty=qty,
                            base_qty=base, r_unit=abs(rec["entry"] - stop), risk_usdt=round(abs(rec["entry"] - stop) * qty, 4),
                            state="初始", adopted=True)
@@ -242,9 +254,10 @@ def place(sym, eid, sig, sz, rec):
         qty = f["executed"]                              # 交易所確認的成交量，不是送出的數量（部分成交時兩者不同）
         fill = f["avg"]
         rec["fill"] = fill; rec["qty"] = qty
+        if fill is None: rec["fill_backfill"] = f.get("oid")          # 成交價查不到：記帳後排背景補登（r71）
         rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
         own = dict(store.get().get("open", {}))
-        own[sym] = dict(pid=uuid.uuid4().hex[:12], engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
+        own[sym] = dict(pid=uuid.uuid4().hex[:12], **_param_version(), engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
                         bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), r_unit=abs(sig.entry - stop_px),   # R 用取整後的停損算（第 4 條）
                         entry=sig.entry, fill=fill, stop=stop_px, qty=qty, base_qty=base_qty,
                         risk_usdt=round(abs(sig.entry - stop_px) * qty, 4), state="初始")
@@ -253,6 +266,8 @@ def place(sym, eid, sig, sz, rec):
         m0 = manager.mark_now(sym)                             # 起始界線：開倉成交之後成交明細的最後一筆（清單第 8 條 r32）
         if m0 is not None:
             own = dict(store.get().get("open", {})); own[sym] = dict(own[sym], trade_mark=m0); store.update(open=own)
+        if rec.get("fill_backfill") is not None:                       # 開倉成交價查不到 → 背景補登（r71）
+            manager.schedule_entry_backfill(sym, store.get()["open"][sym].get("pid"), rec["fill_backfill"], qty, eid)
     except Exception as e:
         # 帳沒記成：pending 還在，下一輪對帳會照交易所數量認領並立刻掛停損
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 成交後記帳失敗 {e}")
@@ -433,7 +448,7 @@ def manage(act, sym, eid="?", stop=None):
             mid = (f"，照成交明細結帳{px}" if manager.num(r.get("exit")) else "，成交明細查不到，出場價與損益記未知")
             return dict(ok=True, msg=head + mid + "；這次沒有送平倉單"
                         + ("。交易所上現在那張是別的部位（均價不同，別的專案或 App 開的），沒有動它" if r.get("replaced") else ""))
-        return dict(ok=True, msg=f"{sym} 已平倉" + px)
+        return dict(ok=True, msg=f"{sym} 已平倉" + (px or "，出場價成交明細還查不到，背景會再查幾次、查到補發通知"))
     if act == "adopt":
         if not getattr(store, "LOADED", True): return dict(error=f"{sym} 持倉紀錄還沒載入（狀態檔讀取失敗），不能認領——認領會把部位寫進還沒載入的帳")
         if mine: return dict(error=f"{sym} 已經在帳上，不需要認領")
@@ -444,7 +459,7 @@ def manage(act, sym, eid="?", stop=None):
         # 交易所那一列是正向證據；走共用送停損處（清單第 2 條 r20）。via 一起記，撤單才知道打哪個端點
         st, so = manager.place_stop(sym, dict(side=side, qty=qty, base_qty=0), stop, known_left=qty)
         own = dict(store.get().get("open", {}))
-        own[sym] = dict(pid=uuid.uuid4().hex[:12], engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
+        own[sym] = dict(pid=uuid.uuid4().hex[:12], **_param_version(), engine=eid, side=side, time=time.strftime("%m-%d %H:%M"),
                         ts=int(time.time() * 1000), entry=entry, fill=entry, stop=stop, qty=qty, r_unit=abs(entry - stop),
                         risk_usdt=round(abs(entry - stop) * qty, 2), adopted=True, stop_id=so.get("orderId"), stop_via=so.get("via"), state="初始",
                         trade_mark=manager.mark_now(sym))   # 起始界線（r32）
@@ -537,6 +552,8 @@ class H(BaseHTTPRequestHandler):
             except Exception: pass
             try: eq, bal = risk.equity_now(); s["equity"] = dict(tier=eq, balance=bal, error=risk._bal.get("error"), **C.SIZING)
             except Exception as e: s["equity"] = dict(error=str(e))
+            try: s["stats"] = stats.report(s.get("closed") or [])                 # 績效統計（依引擎、R 為核心、依幣種、滑價、參數版本）
+            except Exception as e: s["stats"] = dict(error=f"{type(e).__name__}: {e}")
             body, ct = json.dumps(s, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/backtest"):
             q = dict(p.split("=") for p in self.path.split("?")[-1].split("&") if "=" in p) if "?" in self.path else {}

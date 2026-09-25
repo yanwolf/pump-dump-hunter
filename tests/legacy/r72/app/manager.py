@@ -90,7 +90,7 @@ def adopt_partial(sym, pos, cut, px_hint=None):
     part = dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=None, px=None)
     if tr:
         px, pnl, q, last = _segment(tr)
-        part.update(px=px, pnl=pnl); pos["trade_mark"] = last
+        if q >= cut * 0.999: part.update(px=px, pnl=pnl); pos["trade_mark"] = last   # 沒湊滿這段的數量 → 當成還查不到（r71）
     pos["partials"] = (pos.get("partials") or []) + [part]
     return part
 
@@ -101,6 +101,10 @@ def close_info(sym, pos):
         tr = trades_after(sym, pos)
         if not tr: return {}
         px, pnl, q, last = _segment(tr)
+        want = num(pos.get("qty")) or 0
+        if q < want * 0.999:
+            # 成交明細是非同步寫入的：只出現一部分就拿來算，出場價是前半段、損益只算到一部分，還被當成實際成交（r71）
+            _log(f"{sym} 界線之後的平倉成交只有 {q:g}/{want:g}，當成還查不到"); return {}
         parts = [num((x or {}).get("pnl")) for x in pos.get("partials") or []]
         total = round(pnl + sum(parts), 2) if all(p is not None for p in parts) else None
         out = dict(exit=px, pnl=total)
@@ -108,6 +112,61 @@ def close_info(sym, pos):
         return out
     except Exception as e:
         _log(f"{sym} 抓出場價失敗 {e}"); return {}
+
+BACKFILL_DELAYS = (3, 10, 30, 90)       # 查不到成交價時延後再查的秒數（照 gold-scalper，清單第 15 條 r71）
+
+def _start_backfill(job):
+    """背景補登的執行緒。測試換成收集器、由測試自己跑（不會在測試結束後還去打網路）。"""
+    threading.Thread(target=job, daemon=True, name="補登").start()
+
+def _find_closed(cl, snap):
+    for i in range(len(cl) - 1, -1, -1):
+        if same_record(cl[i], snap): return i
+    return None
+
+def schedule_exit_backfill(sym, pos, prev, order_ids):
+    """已平倉但出場價查不到（或損益只能估算）：延後再查成交明細，查到就補寫已平倉紀錄、補發通知；一直查不到推一則補登失敗。
+    未知一樣可以補登成已知——補的是實際成交價，跟「未知不估算」的決定不衝突（r71）。需要的東西在排程當下抄下來，不讀之後會變的部位。"""
+    snap = json.loads(json.dumps(pos)); eng = pos.get("engine")
+    def job():
+        try:
+            for i, d in enumerate(BACKFILL_DELAYS, 1):
+                time.sleep(d)
+                info = close_info(sym, snap)
+                if info.get("exit") is None: continue
+                with ENGINE_LOCK:
+                    cl = list(store.get().get("closed") or []); k = _find_closed(cl, snap)
+                    if k is not None: cl[k] = dict(cl[k], **info, backfilled=True); store.update(closed=cl)
+                telegram.send(f"🧾 {sym} 引擎{eng} 出場成交價補登 @ {info['exit']:.6g}"
+                              + (f"，損益 {info['pnl']:+.2f} U" if num(info.get("pnl")) is not None else "，損益仍未知（前面有一段未知）")
+                              + f"（原本記{prev}；延後 {d} 秒第 {i} 次查到）")
+                return
+            telegram.send(f"⚠️ {sym} 引擎{eng} 出場成交價補登失敗：查了 {len(BACKFILL_DELAYS)} 次，成交明細一直查不到或不完整，這筆維持未知；"
+                          f"單號 {', '.join(str(x) for x in order_ids) if order_ids else '—（交易所端出場，不是本程式送的單）'}")
+        except Exception as e: _step_err(sym, "出場成交價補登", e)
+    _start_backfill(job)
+
+def schedule_entry_backfill(sym, pid, oid, executed, eng):
+    """開倉成交但成交價查不到：延後用單號查成交明細（數量要湊滿），查到補回還開著的部位（或已平倉紀錄），補發通知。"""
+    def job():
+        try:
+            for i, d in enumerate(BACKFILL_DELAYS, 1):
+                time.sleep(d)
+                px = B.fill_from_trades(sym, oid, executed)
+                if not px: continue
+                with ENGINE_LOCK:
+                    own = dict(store.get().get("open", {}))
+                    if sym in own and own[sym].get("pid") == pid:
+                        own[sym] = dict(own[sym], fill=px, fill_backfilled=True); store.update(open=own)
+                    else:
+                        cl = list(store.get().get("closed") or [])
+                        for k in range(len(cl) - 1, -1, -1):
+                            if cl[k].get("pid") == pid: cl[k] = dict(cl[k], fill=px, fill_backfilled=True); store.update(closed=cl); break
+                telegram.send(f"🧾 {sym} 引擎{eng} 進場成交價補登 @ {px:.6g}（原本記未知；延後 {d} 秒第 {i} 次查到）")
+                return
+            telegram.send(f"⚠️ {sym} 引擎{eng} 進場成交價補登失敗：查了 {len(BACKFILL_DELAYS)} 次，成交明細一直查不到或不完整，維持未知；單號 {oid}")
+        except Exception as e: _step_err(sym, "進場成交價補登", e)
+    _start_backfill(job)
 
 def record_close(sym, pos, by, info=None):
     """持倉結束（交易所上確實已經沒有這個部位之後才呼叫）。
@@ -127,6 +186,12 @@ def record_close(sym, pos, by, info=None):
     _missing.pop(sym, None)                          # 補掛連續次數不能留給同幣下一筆（清單第 8 條 r12）
     for k in [k for k in _errs if k[0] == sym]: _errs.pop(k)   # 出錯次數也一樣
     # ---- 界線之後：不可逆的動作與通知，各自 try ----
+    try:
+        # 出場價查不到、或損益只能估算（成交明細還沒湊滿）→ 排背景補登（r71）。有基準部位時成交明細分不出是誰的，補不了
+        if (num(rec.get("exit")) is None or rec.get("pnl_src") == "估算") and (num(pos.get("base_qty")) or 0) <= 1e-9:
+            prev = "未知" if num(rec.get("exit")) is None else f"估算 {rec.get('pnl')}"
+            schedule_exit_backfill(sym, pos, prev, rec.get("order_ids") or [])
+    except Exception as e: _once_err(sym, "排出場補登", e)
     queued = set(store.get().get("leftover", {}))
     for oid, via in [(pos.get("stop_id"), pos.get("stop_via"))] + [tuple(x) for x in pos.get("stale_ids", [])]:
         if not oid or str(oid) in queued: continue       # 已在待撤清單的交給 sweep_leftovers，不重複告警
@@ -209,7 +274,7 @@ def close_now(sym, pos, by):
     - 還是沒平掉 → 保留部位與停損、依節奏告警、拋 CloseFailed；呼叫端每輪會再試（want_close）。"""
     side = pos["side"]; close_side = "SELL" if side == "LONG" else "BUY"
     base = pos.get("base_qty") or 0.0
-    px, err, sent = None, None, 0                     # sent：這次實際送出幾張平倉單（0 = 交易所端已經平掉，r58）
+    px, err, sent, oids = None, None, 0, []            # sent：這次實際送出幾張平倉單（0 = 交易所端已經平掉，r58）；oids：單號（補登失敗時附上）
     # 送單前先確認自己還有多少（清單第 7 條 r15）：扣掉基準後沒有了就不送——
     # 單向共用帳號裡同側有別人的部位時，reduceOnly 單會把別人的平掉。數量取「交易所這一側 − 基準」與帳上的小者。
     left = remaining(sym, side, base, pos)
@@ -223,6 +288,7 @@ def close_now(sym, pos, by):
             sent += 1
             o = B.market_order(sym, close_side, qty, reduce_only=True)
             f = B.confirm_fill(sym, o)                           # 卡在 NEW 的單會被撤掉，不跟下一次的平倉單重疊（r43）
+            if f.get("oid") is not None: oids.append(f["oid"])
             if f["executed"] > 0: px = f["avg"] or px
             if 0 < f["executed"] < qty - 1e-9 or (f["executed"] > 0 and pos.get("close_partial") is None and attempt > 1):
                 pos["close_partial"] = True                      # 部分成交過：出場價要兩段加權，不能只用最後一張單（r43，跟著部位存檔）
@@ -254,8 +320,11 @@ def close_now(sym, pos, by):
               if px and entry and q and all(p is not None for p in parts) else None
     except Exception: pnl = None
     info = dict(exit=px, pnl=pnl)
-    try: info.update({k: v for k, v in close_info(sym, pos).items() if v is not None})   # 成交明細優先，分段加總
-    except Exception: pass
+    try: ci = close_info(sym, pos)                     # 成交明細優先，分段加總；沒湊滿時回空的（r71）
+    except Exception: ci = {}
+    info.update({k: v for k, v in ci.items() if v is not None})
+    if ci.get("exit") is None and pnl is not None: info["pnl_src"] = "估算"   # 損益是拿成交均價自己算的（沒扣手續費），背景補登會換成成交明細的
+    info["order_ids"] = oids
     info["orders_sent"] = sent                            # 手動平倉的回應要分得出「這次按的平倉平掉的」還是「交易所端早就平掉了」
     rec = record_close(sym, pos, by, info)                 # 寫紀錄、移出帳都在裡面
     try:
@@ -488,7 +557,7 @@ _errs = {}               # (symbol, 步驟) → 連續出錯次數
 # 這些步驟一開始拿一份帳本副本、中間查交易所好幾秒、最後整份寫回；兩條執行緒交錯時，後寫的會把先寫的清掉——
 # 對帳期間手動平倉，已結帳的部位被寫回、同一筆結兩次帳；出場管理期間手動平倉失敗，「待平倉」被清掉。
 # 鎖加在函式本身（裝飾器），不是加在某一個呼叫端——不管誰呼叫都擋得到。可重入：同一條執行緒巢狀呼叫不會卡住。
-import functools, threading
+import functools, json, threading
 ENGINE_LOCK = threading.RLock()
 
 def engine_locked(fn):

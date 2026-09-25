@@ -226,33 +226,57 @@ FINAL = ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH")
 def get_order(symbol, order_id):
     return _get("/fapi/v1/order", dict(symbol=symbol, orderId=order_id), signed=True)
 
-def confirm_fill(symbol, o, tries=3, wait=0.3):
-    """市價單送出後確認成交（清單第 15 條）。回 dict(executed, avg, status, known)。
+LOG = print                      # 日誌（Zeabur 的執行紀錄）；測試換成收集器
+
+def _avg(o):
+    """回應裡的均價：avgPrice；沒有（欄位整個不存在或 0）但有成交額時，成交額 ÷ 成交量就是實際均價（U 本位 1 張 = 1 單位，清單第 15 條 r71）。"""
+    a = float(o.get("avgPrice") or 0) or None
+    if a: return a
+    cq, ex = float(o.get("cumQuote") or 0), float(o.get("executedQty") or 0)
+    return cq / ex if cq > 0 and ex > 0 else None
+
+def fill_from_trades(symbol, oid, executed):
+    """用單號在成交明細裡算加權均價。**數量要湊滿成交量**（r71）：成交明細是非同步寫入的，剛成交時常常只出現前幾筆——
+    拿前幾筆算，得到的是前半段的價格，還會被當成實際成交價，比記未知更糟。沒湊滿或查不到 → None。"""
+    try: tr = [t for t in user_trades(symbol) if str(t.get("orderId")) == str(oid)]
+    except Exception as e: LOG(f"[{symbol}] 查成交明細失敗（單號 {oid}）：{e}"); return None
+    q = sum(float(t["qty"]) for t in tr)
+    if not q or q < executed * 0.999:
+        LOG(f"[{symbol}] 成交明細只有 {q:g}/{executed:g}（單號 {oid}），當成還查不到"); return None
+    return sum(float(t["price"]) * float(t["qty"]) for t in tr) / q
+
+def confirm_fill(symbol, o, tries=3, wait=0.3, avg_tries=3, avg_wait=0.5):
+    """市價單送出後確認成交（清單第 15 條）。回 dict(executed, avg, status, known, oid)。
     - 「成功」看 executedQty > 0，不是 HTTP 200；不是最終狀態就用單號查幾次
-    - 查了仍不是最終狀態 → **撤掉那張單**再查一次拿最終成交量（r43：放著不管，之後才成交的數量沒人知道）
+    - 查了仍不是最終狀態 → **撤掉那張單**再查一次拿最終成交量（r43）
     - known=False：查不到最終狀態（查詢失敗）→ 呼叫端當成結果不明
-    - 均價缺漏：用單號在成交明細裡的成交算加權均價（實際成交價，不是估算）；查不到記 None"""
-    st = o.get("status"); ex = float(o.get("executedQty") or 0); avg = float(o.get("avgPrice") or 0) or None
+    - 均價（r71）：avgPrice → 成交額 ÷ 成交量 → 用單號查訂單（最多 avg_tries 次、每次寫日誌）→ 成交明細（數量要湊滿）；
+      都沒有記 None（呼叫端排背景補登）。次數有上限：單已經成交，不能為了一個價格卡住流程。原始回應寫日誌、不進通知。"""
+    st = o.get("status"); ex = float(o.get("executedQty") or 0); avg = _avg(o)
     oid = o.get("orderId")
     if not (st == "FILLED" and ex > 0):
-        if oid is None: return dict(executed=ex, avg=avg, status=st, known=False)
+        if oid is None: return dict(executed=ex, avg=avg, status=st, known=False, oid=oid)
         for _ in range(tries):
             if st in FINAL: break
             time.sleep(wait)
-            try: q = get_order(symbol, oid); st, ex, avg = q.get("status"), float(q.get("executedQty") or 0), float(q.get("avgPrice") or 0) or None
+            try: q = get_order(symbol, oid); st, ex, avg = q.get("status"), float(q.get("executedQty") or 0), _avg(q)
             except Exception: pass
         if st not in FINAL:
             try: cancel_order(symbol, oid, "legacy")
             except Exception: pass                                   # 撤不掉（可能剛好成交了）→ 下面再查一次見分曉
-            try: q = get_order(symbol, oid); st, ex, avg = q.get("status"), float(q.get("executedQty") or 0), float(q.get("avgPrice") or 0) or None
-            except Exception: return dict(executed=ex, avg=avg, status=st, known=False)
-    if ex > 0 and not avg:
-        try:
-            tr = [t for t in user_trades(symbol) if str(t.get("orderId")) == str(oid)]
-            q = sum(float(t["qty"]) for t in tr)
-            avg = sum(float(t["price"]) * float(t["qty"]) for t in tr) / q if q else None
-        except Exception: avg = None
-    return dict(executed=ex, avg=avg, status=st, known=st in FINAL or (st == "FILLED"))
+            try: q = get_order(symbol, oid); st, ex, avg = q.get("status"), float(q.get("executedQty") or 0), _avg(q)
+            except Exception: return dict(executed=ex, avg=avg, status=st, known=False, oid=oid)
+    if ex > 0 and not avg and oid is not None:
+        LOG(f"[{symbol}] 成交 {ex:g} 但回應沒有均價（單號 {oid}），原始回應：{o}")
+        for i in range(1, avg_tries + 1):
+            time.sleep(avg_wait)
+            try:
+                q = get_order(symbol, oid); avg = _avg(q)
+                LOG(f"[{symbol}] 查訂單第 {i} 次（單號 {oid}）：{'均價 ' + format(avg, 'g') if avg else '仍沒有均價'}")
+            except Exception as e: LOG(f"[{symbol}] 查訂單第 {i} 次（單號 {oid}）失敗：{e}")
+            if avg: break
+        if not avg: avg = fill_from_trades(symbol, oid, ex)
+    return dict(executed=ex, avg=avg, status=st, known=st in FINAL or (st == "FILLED"), oid=oid)
 
 def side_of(p):
     """positionRisk 一筆的方向。雙向模式看 positionSide，單向看數量正負。"""
