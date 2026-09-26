@@ -268,7 +268,8 @@ def place(sym, eid, sig, sz, rec):
         if m0 is not None:
             own = dict(store.get().get("open", {})); own[sym] = dict(own[sym], trade_mark=m0); store.update(open=own)
         if rec.get("fill_backfill") is not None:                       # 開倉成交價查不到 → 背景補登（r71）
-            manager.schedule_entry_backfill(sym, store.get()["open"][sym].get("pid"), rec["fill_backfill"], qty, eid)
+            own = dict(store.get().get("open", {})); own[sym] = dict(own[sym], entry_backfill_pending=True); store.update(open=own)   # 記號：重啟後照它重新排（r77）
+            manager.schedule_entry_backfill(sym, own[sym].get("pid"), rec["fill_backfill"], qty, eid)
     except Exception as e:
         # 帳沒記成：pending 還在，下一輪對帳會照交易所數量認領並立刻掛停損
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 成交後記帳失敗 {e}")

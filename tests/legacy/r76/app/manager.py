@@ -83,15 +83,41 @@ def _segment(trades):
     pnl = sum(float(t.get("realizedPnl") or 0) for t in trades) - sum(float(t.get("commission") or 0) for t in trades)
     return float(f"{px:.6g}"), round(pnl, 2), q, max(num(t.get("id")) or 0 for t in trades)
 
+def _claim(trades, skip, want):
+    """從界線之後的平倉成交裡認領一段：依成交 id 先後，**先跳過最早的 skip 張**（還沒認領的部分出場，時間上先發生），再拿剛好 want 張。
+    回 (那幾筆, 狀態)：ok／incomplete（還湊不滿——成交明細非同步寫入，稍後再查）／ambiguous（跳過或拿的邊界落在某一筆中間：
+    數量對不齊，分不出哪幾張是這一段的）。清單第 15 條 r71～r73。"""
+    tol = 1e-6 * max(want, skip, 1)
+    ts = sorted(trades, key=lambda t: num(t.get("id")) or 0)
+    i, s = 0, 0.0
+    while s < skip - tol and i < len(ts): s += float(ts[i]["qty"]); i += 1
+    if s < skip - tol: return None, "incomplete"
+    if s > skip + tol: return None, "ambiguous"
+    taken, q = [], 0.0
+    while q < want - tol and i < len(ts): taken.append(ts[i]); q += float(ts[i]["qty"]); i += 1
+    if q < want - tol: return None, "incomplete"
+    if q > want + tol: return None, "ambiguous"                        # 最後一筆跨過這一段的數量
+    return taken, "ok"
+
+def _unclaimed(pos): return sum(float(x.get("qty") or 0) for x in pos.get("unclaimed") or [])
+
 def adopt_partial(sym, pos, cut, px_hint=None):
     """記一筆部分出場（App 手動減碼、ADL、1R 減碼）。損益只用實際成交（成交明細）；查不到、分不出是誰的就記未知。
-    不用標記價、不用觸發價、不退回進場價（清單第 8 條 r30）。採用了的成交推進界線，最後出場時不會再算一次。"""
+    不用標記價、不用觸發價、不退回進場價（清單第 8 條 r30）。採用了的成交推進界線，最後出場時不會再算一次。
+    查不到（成交明細還沒出現、不完整、分不出）時界線推不過去——記下「還沒認領的這一段」（存在部位裡，重啟不會丟），
+    之後用界線之後的平倉成交時先跳過它（r73：不然最後出場會把這段混進去，數量湊得滿、湊滿檢查擋不住），並排背景補登。"""
     tr = trades_after(sym, pos)
     part = dict(qty=cut, at=time.strftime("%m-%d %H:%M"), pnl=None, px=None)
-    if tr:
-        px, pnl, q, last = _segment(tr)
-        if q >= cut * 0.999: part.update(px=px, pnl=pnl); pos["trade_mark"] = last   # 沒湊滿這段的數量 → 當成還查不到（r71）
+    idx, pend, ok = len(pos.get("partials") or []), list(pos.get("unclaimed") or []), False
+    if tr is not None and not pend:              # 前面還有沒認領的段：這段也先不認領（順序要對得上，界線不能跳過前一段）
+        taken, st = _claim(tr, 0, cut)
+        if st == "ok":
+            px, pnl, q, last = _segment(taken); part.update(px=px, pnl=pnl); pos["trade_mark"] = last; ok = True
+        else: _log(f"{sym} 部分出場 {cut:g} 的成交明細{'還湊不滿' if st == 'incomplete' else '跟數量對不齊'}，這段先記未知")
     pos["partials"] = (pos.get("partials") or []) + [part]
+    if not ok and (num(pos.get("base_qty")) or 0) <= 1e-9:     # 有基準部位時成交明細分不出是誰的，補不了、也不用跳過
+        pos["unclaimed"] = pend + [dict(idx=idx, qty=cut)]
+        schedule_partial_backfill(sym, pos.get("pid"), idx, cut, pos.get("engine"))
     return part
 
 def close_info(sym, pos):
@@ -100,11 +126,13 @@ def close_info(sym, pos):
     try:
         tr = trades_after(sym, pos)
         if not tr: return {}
-        px, pnl, q, last = _segment(tr)
-        want = num(pos.get("qty")) or 0
-        if q < want * 0.999:
-            # 成交明細是非同步寫入的：只出現一部分就拿來算，出場價是前半段、損益只算到一部分，還被當成實際成交（r71）
-            _log(f"{sym} 界線之後的平倉成交只有 {q:g}/{want:g}，當成還查不到"); return {}
+        want, skip = num(pos.get("qty")) or 0, _unclaimed(pos)
+        # 先跳過還沒認領的部分出場（r73），再拿剛好帳上這麼多張：湊不滿＝成交明細還沒寫完（r71）；跨過邊界＝分不出（r73）
+        taken, st = _claim(tr, skip, want)
+        if st != "ok":
+            _log(f"{sym} 界線之後的平倉成交{'還湊不滿' if st == 'incomplete' else '跟帳上數量對不齊（分不出）'}"
+                 f"（跳過 {skip:g}、要 {want:g}、明細 {sum(float(t['qty']) for t in tr):g}），出場價先記未知"); return {}
+        px, pnl, q, last = _segment(taken)
         parts = [num((x or {}).get("pnl")) for x in pos.get("partials") or []]
         total = round(pnl + sum(parts), 2) if all(p is not None for p in parts) else None
         out = dict(exit=px, pnl=total)
@@ -136,15 +164,67 @@ def schedule_exit_backfill(sym, pos, prev, order_ids):
                 if info.get("exit") is None: continue
                 with ENGINE_LOCK:
                     cl = list(store.get().get("closed") or []); k = _find_closed(cl, snap)
-                    if k is not None: cl[k] = dict(cl[k], **info, backfilled=True); store.update(closed=cl)
+                    if k is not None:
+                        cl[k] = dict(cl[k], **info, backfilled=True); cl[k].pop("backfill_pending", None); cl[k].pop("pnl_src", None)
+                        store.update(closed=cl)
                 telegram.send(f"🧾 {sym} 引擎{eng} 出場成交價補登 @ {info['exit']:.6g}"
                               + (f"，損益 {info['pnl']:+.2f} U" if num(info.get("pnl")) is not None else "，損益仍未知（前面有一段未知）")
                               + f"（原本記{prev}；延後 {d} 秒第 {i} 次查到）")
                 return
+            with ENGINE_LOCK:                                          # 補登結束（查不到）：清掉記號，重啟後不再排
+                cl = list(store.get().get("closed") or []); k = _find_closed(cl, snap)
+                if k is not None: cl[k] = dict(cl[k]); cl[k].pop("backfill_pending", None); store.update(closed=cl)
             telegram.send(f"⚠️ {sym} 引擎{eng} 出場成交價補登失敗：查了 {len(BACKFILL_DELAYS)} 次，成交明細一直查不到或不完整，這筆維持未知；"
                           f"單號 {', '.join(str(x) for x in order_ids) if order_ids else '—（交易所端出場，不是本程式送的單）'}")
         except Exception as e: _step_err(sym, "出場成交價補登", e)
     _start_backfill(job)
+
+def schedule_partial_backfill(sym, pid, idx, cut, eng):
+    """部分出場查不到成交明細：延後再查。那段出現時換成實際損益、界線推進過去、清掉「還沒認領」記號（r73）。
+    部位已經結帳就不做（結帳時已經跳過這段）；前面還有更早的段沒認領就等它（界線只能依序推進）。"""
+    def job():
+        try:
+            for i, d in enumerate(BACKFILL_DELAYS, 1):
+                time.sleep(d)
+                with ENGINE_LOCK:
+                    own = dict(store.get().get("open", {})); p = own.get(sym)
+                    if not p or p.get("pid") != pid: return                     # 已結帳或換成別筆
+                    pend = list(p.get("unclaimed") or [])
+                    if not any(x.get("idx") == idx for x in pend): return      # 已經處理過
+                    if pend[0].get("idx") != idx: continue                      # 更早的段還沒認領
+                    tr = trades_after(sym, p)
+                    if tr is None: continue
+                    taken, st = _claim(tr, 0, cut)
+                    if st != "ok": continue
+                    px, pnl, q, last = _segment(taken)
+                    parts = list(p.get("partials") or [])
+                    if idx < len(parts): parts[idx] = dict(parts[idx], px=px, pnl=pnl, backfilled=True)
+                    own[sym] = dict(p, partials=parts, trade_mark=last, unclaimed=pend[1:]); store.update(open=own)
+                telegram.send(f"🧾 {sym} 引擎{eng} 部分出場成交價補登 @ {px:.6g}，這段 {cut:g} 張損益 {pnl:+.2f} U（原本記未知；延後 {d} 秒第 {i} 次查到）")
+                return
+            telegram.send(f"⚠️ {sym} 引擎{eng} 部分出場成交價補登失敗：查了 {len(BACKFILL_DELAYS)} 次，這段 {cut:g} 張的成交明細一直查不到或對不齊，維持未知")
+        except Exception as e: _step_err(sym, "部分出場補登", e)
+    _start_backfill(job)
+
+def resume_backfills():
+    """服務重啟（或狀態檔讀回來）之後，照存在狀態檔裡的記號重新排背景補登（清單第 15 條 r75）：
+    補登是執行緒，重啟就沒了——記號永遠在、那段永遠是未知。三種都看：
+    - 部分出場：部位上還有「還沒認領」→ 排部分出場補登（依序推進由補登本身保證）
+    - 進場成交價：部位沒有成交價、但有開倉單號 → 用單號排進場補登
+    - 出場成交價：已平倉紀錄上記著「補登還沒完成」→ 照那筆紀錄排出場補登
+    回傳排了幾個。"""
+    n = 0; s = store.get()
+    for sym, p in (s.get("open") or {}).items():
+        for u in p.get("unclaimed") or []:
+            schedule_partial_backfill(sym, p.get("pid"), u.get("idx"), num(u.get("qty")) or 0, p.get("engine")); n += 1
+        if num(p.get("fill")) is None and p.get("entry_oid") is not None:
+            schedule_entry_backfill(sym, p.get("pid"), p["entry_oid"], num(p.get("entry_exec")) or num(p.get("qty")) or 0, p.get("engine")); n += 1
+    for c in s.get("closed") or []:
+        if c.get("backfill_pending") and c.get("symbol"):
+            prev = "未知" if num(c.get("exit")) is None else f"估算 {c.get('pnl')}"
+            schedule_exit_backfill(c["symbol"], c, prev + "（重啟前排的）", c.get("order_ids") or []); n += 1
+    if n: _log(f"重啟後重新排了 {n} 個背景補登")
+    return n
 
 def schedule_entry_backfill(sym, pid, oid, executed, eng):
     """開倉成交但成交價查不到：延後用單號查成交明細（數量要湊滿），查到補回還開著的部位（或已平倉紀錄），補發通知。"""
@@ -179,6 +259,9 @@ def record_close(sym, pos, by, info=None):
     try: info = close_info(sym, pos) if info is None else info
     except Exception: info = {}
     rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **(info or {}))
+    # 出場價查不到、或損益只能估算 → 要排背景補登。記號跟著紀錄存進狀態檔：重啟後照它重新排（r75，補登是執行緒，重啟就沒了）
+    need_bf = (num(rec.get("exit")) is None or rec.get("pnl_src") == "估算") and (num(pos.get("base_qty")) or 0) <= 1e-9
+    if need_bf: rec["backfill_pending"] = True
     # ---- 界線 ----
     store.push("closed", rec)
     own = dict(store.get().get("open", {})); own.pop(sym, None); store.update(open=own)
@@ -188,7 +271,7 @@ def record_close(sym, pos, by, info=None):
     # ---- 界線之後：不可逆的動作與通知，各自 try ----
     try:
         # 出場價查不到、或損益只能估算（成交明細還沒湊滿）→ 排背景補登（r71）。有基準部位時成交明細分不出是誰的，補不了
-        if (num(rec.get("exit")) is None or rec.get("pnl_src") == "估算") and (num(pos.get("base_qty")) or 0) <= 1e-9:
+        if need_bf:
             prev = "未知" if num(rec.get("exit")) is None else f"估算 {rec.get('pnl')}"
             schedule_exit_backfill(sym, pos, prev, rec.get("order_ids") or [])
     except Exception as e: _once_err(sym, "排出場補登", e)
@@ -239,7 +322,7 @@ def replaced(pos, rows, sym=None):
     sym = sym or next((r.get("symbol") for r in rows if r.get("symbol")), None)
     tr = trades_after(sym, pos)
     if tr is None: return None
-    closed_q = sum(float(t.get("qty") or 0) for t in tr)
+    closed_q = sum(float(t.get("qty") or 0) for t in tr) - _unclaimed(pos)   # 還沒認領的部分出場不算原本那筆的平倉（r73）
     return closed_q >= (num(pos.get("qty")) or 0) * 0.999
 
 def remaining(sym, side, base=0.0, pos=None):

@@ -40,6 +40,7 @@ tests/test_stats.py   績效統計（預期值手算）與開倉記參數版本�
 tests/test_r71.py     清單 r70→r71：FILLED 沒均價（cumQuote 備援、查單 3 次、成交明細要湊滿、背景補登）（python -m tests.test_r71）
 tests/test_r73.py     清單 r72→r73：部分出場查不到時記「還沒認領」、最後出場先跳過；跨過帳上數量記未知；部分出場補登（python -m tests.test_r73）
 tests/test_r75.py     清單 r74→r75：重啟前後（真的存檔、重新載入）部分出場／進場／出場補登重新排；正式路徑真的開執行緒（python -m tests.test_r75）
+tests/test_r77.py     清單 r76→r77：進場補登記號（部位平掉後、重啟後照排；放棄後不再每次重查）（python -m tests.test_r77）
 tests/test_maxqty.py  交易所市價單數量上限（-4005，2026-09-22 SKRUSDT 實單）：開倉壓到上限、平倉分批
 tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版）；python -m tests.rerun_old legacy:rNN
 tests/check_indexing.py 先索引沒先確認的靜態檢查；--self-test 自我驗證
