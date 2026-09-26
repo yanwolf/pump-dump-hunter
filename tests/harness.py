@@ -129,6 +129,7 @@ def check(tag, name, cond, detail="", infra=False):
 def fresh(hedge=False, algo="ok"):
     """每個情境的第一句：新的模擬交易所、清快取、還原換掉的函式、清計數器與帳本。先把上一個情境的錯誤區與推播收進 ALL_ERR。"""
     ALL_ERR.extend(store.get().get("errors", [])); ALL_ERR.extend(TG)
+    _restore_modules()                            # 結構性還原（r79）：先整份還原程式模組，再裝上模擬交易所
     fx = FakeBinance(hedge=hedge, algo=algo).install()
     B._mode.update(hedge=None, t=0); B._F.clear()
     if hasattr(B, "_algo"): B._algo.update(legacy_until=0.0)
@@ -194,3 +195,41 @@ def finish(allowed=()):
           f"真的開了 {REAL_THREADS['n']} 個、刻意的 {REAL_THREADS['allowed']} 個")
     print("\n全部通過" if not fails else f"\n{len(fails)} 項失敗：{sorted(set(fails))}")
     sys.exit(1 if fails else 0)
+
+
+# ---- 結構性還原（清單用法第 5 點 r79）----
+# 以前是清單式的：RESET_ATTRS／RESET_STATE 列出來的才還原，靜態檢查只補得到「底線開頭的可變容器」。
+# 用新值取代的旗標（`_x = False` 被改成 True）、執行期才長出來的屬性都不在範圍內——新增時要記得加。
+# 改成：框架載入完、自己的替換裝好之後，拍下每個程式模組的整份命名空間；每個情境開始時整份還原，之後才長出來的屬性直接刪掉。
+# 容器照內容還原（同一個物件、清空再填回快照的深拷貝），其他（函式、模組、鎖、不可變的值）還原成快照那個物件。
+import copy as _cp, types as _types
+_MOD_SNAP = {}
+def _snapshot_modules():
+    for name, m in list(sys.modules.items()):
+        if not name.startswith("app.") or m is None: continue
+        snap = {}
+        for k, v in vars(m).items():
+            if k.startswith("__"): continue
+            if isinstance(v, (dict, list, set)):
+                try: snap[k] = ("box", _cp.deepcopy(v))
+                except Exception: snap[k] = ("ref", v)
+            else: snap[k] = ("ref", v)
+        _MOD_SNAP[name] = snap
+
+def _restore_modules():
+    for name, snap in _MOD_SNAP.items():
+        m = sys.modules.get(name)
+        if m is None: continue
+        for k in [k for k in list(vars(m)) if not k.startswith("__") and k not in snap]:
+            delattr(m, k)                          # 之後才長出來的屬性：刪掉
+        for k, (kind, v) in snap.items():
+            cur = getattr(m, k, None)
+            if kind == "box":
+                val = _cp.deepcopy(v)
+                if type(cur) is type(v) and isinstance(cur, dict): cur.clear(); cur.update(val)
+                elif type(cur) is type(v) and isinstance(cur, list): cur[:] = val
+                elif type(cur) is type(v) and isinstance(cur, set): cur.clear(); cur |= val
+                else: setattr(m, k, val)
+            elif cur is not v: setattr(m, k, v)
+
+_snapshot_modules()

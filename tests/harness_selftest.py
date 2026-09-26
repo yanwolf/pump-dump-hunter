@@ -47,6 +47,12 @@ CASES = {
         'telegram.send("x")\ncheck("A", "a", True)\nfinish()\n', 1, "真的開了 1 個"),
     "沒開補登執行緒 → 這一項通過": (
         'fx = fresh()\ntelegram.send("x")\ncheck("A", "a", True)\nfinish()\n', 0, "真的開了 0 個"),
+    "結構性還原：新長出來的屬性刪掉、換掉的不可變值與旗標還原（清單式管不到的兩種，r79）": (
+        'fx = fresh()\nd0 = manager.BACKFILL_DELAYS\n'
+        'manager._brand_new_flag = True\nmanager.BACKFILL_DELAYS = (0,)\nmain._resumed["done"] = True\n'
+        'fx = fresh()\nleft = [x for x, ok in (("新屬性", not hasattr(manager, "_brand_new_flag")), ("不可變值", manager.BACKFILL_DELAYS == d0),'
+        ' ("旗標", not main._resumed.get("done"))) if not ok]\n'
+        'print("沒還原", left)\ntelegram.send("x")\ncheck("A", "全部還原", not left)\nfinish()\n', 0, "沒還原 []"),
     "一般項目印這個情境的命中次數": (
         'fx = fresh()\nfx.mut_hits = 3\ntelegram.send("x")\ncheck("A", "一般", True)\nfinish()\n', 0, "一般〔命中3〕"),
 }

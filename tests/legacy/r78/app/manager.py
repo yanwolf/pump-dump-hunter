@@ -164,11 +164,16 @@ def schedule_exit_backfill(sym, pos, prev, order_ids):
                 if info.get("exit") is None: continue
                 with ENGINE_LOCK:
                     cl = list(store.get().get("closed") or []); k = _find_closed(cl, snap)
-                    if k is not None: cl[k] = dict(cl[k], **info, backfilled=True); store.update(closed=cl)
+                    if k is not None:
+                        cl[k] = dict(cl[k], **info, backfilled=True); cl[k].pop("backfill_pending", None); cl[k].pop("pnl_src", None)
+                        store.update(closed=cl)
                 telegram.send(f"🧾 {sym} 引擎{eng} 出場成交價補登 @ {info['exit']:.6g}"
                               + (f"，損益 {info['pnl']:+.2f} U" if num(info.get("pnl")) is not None else "，損益仍未知（前面有一段未知）")
                               + f"（原本記{prev}；延後 {d} 秒第 {i} 次查到）")
                 return
+            with ENGINE_LOCK:                                          # 補登結束（查不到）：清掉記號，重啟後不再排
+                cl = list(store.get().get("closed") or []); k = _find_closed(cl, snap)
+                if k is not None: cl[k] = dict(cl[k]); cl[k].pop("backfill_pending", None); store.update(closed=cl)
             telegram.send(f"⚠️ {sym} 引擎{eng} 出場成交價補登失敗：查了 {len(BACKFILL_DELAYS)} 次，成交明細一直查不到或不完整，這筆維持未知；"
                           f"單號 {', '.join(str(x) for x in order_ids) if order_ids else '—（交易所端出場，不是本程式送的單）'}")
         except Exception as e: _step_err(sym, "出場成交價補登", e)
@@ -201,6 +206,43 @@ def schedule_partial_backfill(sym, pid, idx, cut, eng):
         except Exception as e: _step_err(sym, "部分出場補登", e)
     _start_backfill(job)
 
+def resume_backfills():
+    """服務重啟（或狀態檔讀回來）之後，照存在狀態檔裡的記號重新排背景補登（清單第 15 條 r75）：
+    補登是執行緒，重啟就沒了——記號永遠在、那段永遠是未知。三種都看：
+    - 部分出場：部位上還有「還沒認領」→ 排部分出場補登（依序推進由補登本身保證）
+    - 進場成交價：部位或已平倉紀錄上記著「進場補登還沒完成」→ 用開倉單號排（r77：部位平掉之後也要）；
+      沒有記號的舊紀錄（r75 以前）：部位沒有成交價、有開倉單號就排
+    - 出場成交價：已平倉紀錄上記著「補登還沒完成」→ 照那筆紀錄排出場補登
+    回傳排了幾個。"""
+    n = 0; s = store.get()
+    for sym, p in (s.get("open") or {}).items():
+        for u in p.get("unclaimed") or []:
+            schedule_partial_backfill(sym, p.get("pid"), u.get("idx"), num(u.get("qty")) or 0, p.get("engine")); n += 1
+        legacy = "entry_backfill_pending" not in p and num(p.get("fill")) is None and p.get("entry_oid") is not None   # r75 以前的舊紀錄：沒有記號
+        if (p.get("entry_backfill_pending") or legacy) and p.get("entry_oid") is not None:
+            schedule_entry_backfill(sym, p.get("pid"), p["entry_oid"], num(p.get("entry_exec")) or num(p.get("qty")) or 0, p.get("engine")); n += 1
+    for c in s.get("closed") or []:
+        # 進場補登跑完之前部位就平掉、接著重啟（r77）：已平倉紀錄上的記號也照排，查到寫回那筆紀錄
+        if c.get("entry_backfill_pending") and c.get("entry_oid") is not None and c.get("symbol"):
+            schedule_entry_backfill(c["symbol"], c.get("pid"), c["entry_oid"], num(c.get("entry_exec")) or num(c.get("qty")) or 0, c.get("engine")); n += 1
+        if c.get("backfill_pending") and c.get("symbol"):
+            prev = "未知" if num(c.get("exit")) is None else f"估算 {c.get('pnl')}"
+            schedule_exit_backfill(c["symbol"], c, prev + "（重啟前排的）", c.get("order_ids") or []); n += 1
+    if n: _log(f"重啟後重新排了 {n} 個背景補登")
+    return n
+
+def _entry_mark(sym, pid, **fields):
+    """進場補登結束（查到或放棄）：部位還開著就寫部位，已經平掉就寫已平倉紀錄；記號標成 False（不是刪掉——
+    刪掉的話分不出「放棄過」和「r75 以前的舊紀錄、從來沒有記號」，舊紀錄的重排規則會讓放棄過的每次重啟都再查一輪）。"""
+    with ENGINE_LOCK:
+        own = dict(store.get().get("open", {}))
+        if sym in own and own[sym].get("pid") == pid:
+            own[sym] = dict(own[sym], **fields, entry_backfill_pending=False); store.update(open=own); return
+        cl = list(store.get().get("closed") or [])
+        for k in range(len(cl) - 1, -1, -1):
+            if cl[k].get("pid") == pid:
+                cl[k] = dict(cl[k], **fields, entry_backfill_pending=False); store.update(closed=cl); return
+
 def schedule_entry_backfill(sym, pid, oid, executed, eng):
     """開倉成交但成交價查不到：延後用單號查成交明細（數量要湊滿），查到補回還開著的部位（或已平倉紀錄），補發通知。"""
     def job():
@@ -209,16 +251,10 @@ def schedule_entry_backfill(sym, pid, oid, executed, eng):
                 time.sleep(d)
                 px = B.fill_from_trades(sym, oid, executed)
                 if not px: continue
-                with ENGINE_LOCK:
-                    own = dict(store.get().get("open", {}))
-                    if sym in own and own[sym].get("pid") == pid:
-                        own[sym] = dict(own[sym], fill=px, fill_backfilled=True); store.update(open=own)
-                    else:
-                        cl = list(store.get().get("closed") or [])
-                        for k in range(len(cl) - 1, -1, -1):
-                            if cl[k].get("pid") == pid: cl[k] = dict(cl[k], fill=px, fill_backfilled=True); store.update(closed=cl); break
+                _entry_mark(sym, pid, fill=px, fill_backfilled=True)          # 還開著補部位、已平倉補紀錄；記號標成已結束（r77）
                 telegram.send(f"🧾 {sym} 引擎{eng} 進場成交價補登 @ {px:.6g}（原本記未知；延後 {d} 秒第 {i} 次查到）")
                 return
+            _entry_mark(sym, pid)                                          # 放棄：記號標成已結束，重啟後不再每次重查一輪（r77）
             telegram.send(f"⚠️ {sym} 引擎{eng} 進場成交價補登失敗：查了 {len(BACKFILL_DELAYS)} 次，成交明細一直查不到或不完整，維持未知；單號 {oid}")
         except Exception as e: _step_err(sym, "進場成交價補登", e)
     _start_backfill(job)
@@ -234,6 +270,9 @@ def record_close(sym, pos, by, info=None):
     try: info = close_info(sym, pos) if info is None else info
     except Exception: info = {}
     rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by=by, **(info or {}))
+    # 出場價查不到、或損益只能估算 → 要排背景補登。記號跟著紀錄存進狀態檔：重啟後照它重新排（r75，補登是執行緒，重啟就沒了）
+    need_bf = (num(rec.get("exit")) is None or rec.get("pnl_src") == "估算") and (num(pos.get("base_qty")) or 0) <= 1e-9
+    if need_bf: rec["backfill_pending"] = True
     # ---- 界線 ----
     store.push("closed", rec)
     own = dict(store.get().get("open", {})); own.pop(sym, None); store.update(open=own)
@@ -243,7 +282,7 @@ def record_close(sym, pos, by, info=None):
     # ---- 界線之後：不可逆的動作與通知，各自 try ----
     try:
         # 出場價查不到、或損益只能估算（成交明細還沒湊滿）→ 排背景補登（r71）。有基準部位時成交明細分不出是誰的，補不了
-        if (num(rec.get("exit")) is None or rec.get("pnl_src") == "估算") and (num(pos.get("base_qty")) or 0) <= 1e-9:
+        if need_bf:
             prev = "未知" if num(rec.get("exit")) is None else f"估算 {rec.get('pnl')}"
             schedule_exit_backfill(sym, pos, prev, rec.get("order_ids") or [])
     except Exception as e: _once_err(sym, "排出場補登", e)
