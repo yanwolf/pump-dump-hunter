@@ -35,20 +35,19 @@ def _chain(node, alias, legacy_any):
     return mod, parts[-1]
 
 def _scopes(tree):
-    """用法的範圍：輔助函式看自己的函式；最上層依 fresh() 切成情境（跟 check_tests 一致）。回 [(節點們)]。"""
+    """用法的範圍（清單用法第 5 點 r79、r81）：每個函式是一個範圍；最上層依 fresh() 切成情境，每個情境是一個範圍。
+    回 [(名稱, 敘述清單)]。範圍之間互不相通：前一個情境、別的函式裡的守護都不算。"""
     out = []
     for n in ast.walk(tree):
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)): out.append(("函式 " + n.name, list(ast.walk(n))))
-    top, cur = [], []
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)): out.append(("函式 " + n.name, list(n.body)))
+    cur, k = [], 0
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)): continue
         if any(isinstance(x, ast.Call) and getattr(x.func, "id", "") == "fresh" for x in ast.walk(n)) and cur:
-            top.append(cur); cur = []
-        cur.extend(ast.walk(n))
-    if cur: top.append(cur)
-    out += [("情境", ns) for ns in top]
+            out.append((f"情境 {k}", cur)); cur = []; k += 1
+        cur.append(n)
+    if cur: out.append((f"情境 {k}", cur))
     return out
-
 
 def _parents(tree):
     p = {}
@@ -101,46 +100,122 @@ def legacy_names():
         out[ver] = names
     return out
 
+def _walk_no_defs(node):
+    """走過節點，但不進函式定義（定義不等於執行：前面定義的函式裡有守護不算，r81）。lambda 會在這一句被呼叫，照走。"""
+    yield node
+    for c in ast.iter_child_nodes(node):
+        if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)): continue
+        yield from _walk_no_defs(c)
+
+def _guard_target(n, alias):
+    if isinstance(n, ast.Call) and getattr(n.func, "id", "") in ("hasattr", "getattr") and len(n.args) >= 2 \
+            and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str):
+        return _chain(ast.Attribute(value=n.args[0], attr=n.args[1].value, ctx=ast.Load()), alias, None)
+    return None
+
+def _positive(expr, tgt, alias):
+    """expr 成立時，tgt 一定存在：守護出現在 expr 裡、不在 `not` 底下、不在 `or` 裡（r81）。"""
+    if _guard_target(expr, alias) == tgt: return True
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not): return False
+    if isinstance(expr, ast.BoolOp): return isinstance(expr.op, ast.And) and any(_positive(v, tgt, alias) for v in expr.values)
+    return any(_positive(c, tgt, alias) for c in ast.iter_child_nodes(expr)
+               if not isinstance(c, (ast.FunctionDef, ast.Lambda)))
+
+def _contains(stmt, tgt, alias):
+    """前面的敘述「擋得住」：不存在就離開（`if not hasattr(…): return／continue／break／raise`）、或 `assert hasattr(…)`。
+    只是出現過守護不算——`check("（前提）…", hasattr(X, "a"))` 前提失敗只記一筆、不會停下來，後面照樣執行、照樣崩（r82）。"""
+    if isinstance(stmt, ast.Assert): return _positive(stmt.test, tgt, alias)
+    if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.UnaryOp) and isinstance(stmt.test.op, ast.Not) \
+            and _positive(stmt.test.operand, tgt, alias) and stmt.body \
+            and isinstance(stmt.body[-1], (ast.Return, ast.Continue, ast.Break, ast.Raise)):
+        return True
+    return False
+
+def _guarded(use, tgt, stmts, par, alias):
+    """照執行順序判斷 use 之前 tgt 有沒有被確認存在（r81）：
+    - 在「以守護為條件」的分支裡：`if` 的本體、條件運算式的本體、`and` 的後段（else 那一邊、`or`、`not` 底下都不算）
+    - 或寫在前面的敘述裡：同一個區塊或外層區塊、排在前面（不越過自己的範圍；前面定義的函式不算）"""
+    top = set(map(id, stmts)); node = use
+    while True:
+        p = par.get(node)
+        if p is None: return False
+        if isinstance(p, ast.If) and node in p.body and _positive(p.test, tgt, alias): return True
+        if isinstance(p, ast.IfExp) and node is p.body and _positive(p.test, tgt, alias): return True
+        if isinstance(p, ast.BoolOp) and isinstance(p.op, ast.And) and node in p.values:
+            if any(_positive(v, tgt, alias) for v in p.values[:p.values.index(node)]): return True
+        if isinstance(node, ast.stmt):
+            if id(node) in top:
+                # 走到範圍自己的最上層敘述：只看範圍自己的清單，不能再看外面（模組的敘述清單裡有前一個情境、前面定義的函式——r81 gold-scalper 那個錯）
+                return any(_contains(s, tgt, alias) for s in stmts[:[id(x) for x in stmts].index(id(node))])
+            for field in ("body", "orelse", "finalbody"):
+                blk = getattr(p, field, None)
+                if isinstance(blk, list) and node in blk:
+                    if any(_contains(s, tgt, alias) for s in blk[:blk.index(node)]): return True
+        if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)): return False
+        node = p
+
 def new_interface(src, legacy, alias=None):
-    """「呼叫新介面前先確認存在」（清單用法第 5 點 r38；r79 改成逐處檢查）：
-    測試用到的程式屬性，在 tests/legacy/ 任一版不存在時，**這一處之前、同一個範圍裡**要有**同一個（模組, 屬性）**的
-    hasattr(…, "屬性")／getattr(…, "屬性", …) 守護。以前看整個檔案有沒有出現過守護——別處剛好有一個就放過（r78 的 main._resumed）。
-    賦值目標（測試把屬性換掉）不算用法：換掉一個不存在的屬性不會崩，而且另有框架還原的檢查。"""
+    """「呼叫新介面前先確認存在」（清單用法第 5 點 r38；r79 逐處檢查；r81 照執行順序）：
+    測試用到的程式屬性，在 tests/legacy/ 任一版不存在時，這一處執行之前、同一個範圍裡要確認過**同一個（模組, 屬性）**存在（見 _guarded）。
+    賦值目標（測試把屬性換掉）不算用法；在這個範圍被當成區域變數的名稱不是那個模組（`for manager in …`）。"""
     alias = alias or MOD_FILE
     tree = ast.parse(src); out = []; seen = set(); par = _parents(tree)
-    for scope, nodes in _scopes(tree):
-        guards = []
-        for n in nodes:
-            if isinstance(n, ast.Call) and getattr(n.func, "id", "") in ("hasattr", "getattr") and len(n.args) >= 2 \
-                    and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str):
-                base = n.args[0]
-                tgt = _chain(ast.Attribute(value=base, attr=n.args[1].value, ctx=ast.Load()), alias, None)
-                if tgt: guards.append((tgt, (n.lineno, n.col_offset)))
-        for n in nodes:
-            if not isinstance(n, ast.Attribute) or isinstance(n.ctx, ast.Store) or n.attr.startswith("__"): continue
-            tgt = _chain(n, alias, None)
-            if not tgt: continue
-            mod, attr = tgt
-            missing = [v for v, names in legacy.items() if mod in names and attr not in names[mod]]
-            if not missing: continue
-            pos = (n.lineno, n.col_offset)
-            if any(g == tgt and gp <= pos for g, gp in guards): continue
-            # 條件運算式 `X.a if hasattr(X, "a") else …`：守護寫在後面，但執行時先判斷條件——用法在 body 裡、條件守同一個屬性就算
-            cur, ok = n, False
-            while cur in par:
-                p = par[cur]
-                if isinstance(p, ast.IfExp) and cur is p.body and any(
-                        isinstance(c, ast.Call) and getattr(c.func, "id", "") in ("hasattr", "getattr") and len(c.args) >= 2
-                        and isinstance(c.args[1], ast.Constant) and _chain(ast.Attribute(value=c.args[0], attr=c.args[1].value, ctx=ast.Load()), alias, None) == tgt
-                        for c in ast.walk(p.test)): ok = True; break
-                cur = p
-            if ok: continue
-            key = (scope, mod, attr, n.lineno)
-            if key in seen: continue
-            seen.add(key)
-            out.append(f"第 {n.lineno} 行（{scope}）：{mod}.{attr} 在舊版 {missing} 裡不存在，這一處之前沒有守同一個屬性的 hasattr／getattr——"
-                       "在舊版上重跑會崩掉（第 B 類）")
+    for scope, stmts in _scopes(tree):
+        local = set()
+        for st in stmts:
+            for x in _walk_no_defs(st):
+                if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store): local.add(x.id)
+        if scope.startswith("函式 "):
+            fn = next(f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and list(f.body) == stmts)
+            local |= {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+        al = {k: v for k, v in alias.items() if k not in local}
+        for st in stmts:
+            for n in _walk_no_defs(st):
+                if not isinstance(n, ast.Attribute) or isinstance(n.ctx, ast.Store) or n.attr.startswith("__"): continue
+                tgt = _chain(n, al, None)
+                if not tgt: continue
+                mod, attr = tgt
+                missing = [v for v, names in legacy.items() if mod in names and attr not in names[mod]]
+                if not missing or _guarded(n, tgt, stmts, par, al): continue
+                key = (scope, mod, attr, n.lineno)
+                if key in seen: continue
+                seen.add(key)
+                out.append(f"第 {n.lineno} 行（{scope}）：{mod}.{attr} 在舊版 {missing} 裡不存在，執行到這裡之前沒有確認同一個屬性存在——"
+                           "在舊版上重跑會崩掉（第 B 類）")
     return out
+
+def reset_then_use(src, alias=None):
+    """C 類（清單用法第 5 點 r81、r82）：「先裝再重設」——測試在程式模組上換了東西、之後 fresh()（整份還原）或重新載入模組（模擬重啟），
+    重設之後**還直接用那個屬性**、中間沒重新換上：還原把它換回真的，測試照樣通過、沒有任何失敗訊號（等於悄悄在真的函式上跑）。
+    只看最上層的敘述（依執行順序）；輔助函式裡的換上／使用照它被呼叫的地方算不進來，這裡不追。"""
+    alias = alias or MOD_FILE
+    tree = ast.parse(src); out = []; patched, reset = {}, {}          # patched：換上的屬性 → 換上的行號
+    def targets(node, ctx):
+        for n in _walk_no_defs(node):
+            if isinstance(n, ast.Attribute) and isinstance(n.ctx, ctx) and isinstance(n.value, ast.Name) and n.value.id in alias:
+                yield (n.value.id, n.attr), n
+    for st in tree.body:
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)): continue
+        for key, n in targets(st, ast.Load):                           # 先看這一句有沒有用到已經被重設的
+            if key in reset:
+                out.append(f"第 {n.lineno} 行：{key[0]}.{key[1]} 在第 {reset[key][1]} 行換上、第 {reset[key][0]} 行{reset[key][2]}之後沒重新換上就用了——"
+                           "用到的其實是真的（C 類：先裝再重設）")
+                reset.pop(key)
+        for k, n in targets(st, ast.Store): patched[k] = n.lineno; reset.pop(k, None)
+        for n in _walk_no_defs(st):
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "fresh":
+                for k in list(patched): reset[k] = (n.lineno, patched.pop(k), "fresh()")
+            if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "reload" and n.args and isinstance(n.args[0], ast.Name):
+                for k in [k for k in patched if k[0] == n.args[0].id]: reset[k] = (n.lineno, patched.pop(k), "重新載入")
+    return out
+
+SELF_C = {
+    "換上 → fresh() → 直接用（沒重新換上）": ("fx = fresh()\nmanager._now = lambda: 1\nfx = fresh()\nx = manager._now()\n", 1),
+    "換上 → fresh() → 重新換上 → 用": ("fx = fresh()\nmanager._now = lambda: 1\nfx = fresh()\nmanager._now = lambda: 2\nx = manager._now()\n", 0),
+    "換上 → 重新載入同一個模組 → 用": ("store.get = lambda: 1\nimportlib.reload(store)\nx = store.get()\n", 1),
+    "換上 → 重新載入別的模組 → 用": ("store.get = lambda: 1\nimportlib.reload(main)\nx = store.get()\n", 0),
+    "換上之後同一個情境裡用（沒有重設）": ("fx = fresh()\nmanager._now = lambda: 1\nx = manager._now()\n", 0),
+}
 
 SELF_A = {
     "trigger 沒守護": ("fx = fresh()\nfx.trigger('X', 'LONG', 100)\n", 1),
@@ -159,7 +234,7 @@ SELF_B_LEGACY = {"r0": {"manager": {"run", "close_now", "telegram"}, "main": {"r
 SELF_B_ALIAS = {"manager": "manager", "main": "main", "scanner": "scanner", "telegram": "telegram"}
 SELF_B = {
     "用了舊版沒有的屬性、沒守護": ("r = manager.brand_new()\n", 1),
-    "有 hasattr 守護（同一個屬性、在之前）": ('check("a", "前提", hasattr(manager, "brand_new"))\nr = manager.brand_new()\n', 0),
+    "前提 check 裡有 hasattr、之後使用：前提失敗不會停下來，擋不住（r79 時預期寫成 0，r82 更正）": ('check("a", "前提", hasattr(manager, "brand_new"))\nr = manager.brand_new()\n', 1),
     "舊版有的屬性": ("manager.run()\n", 0),
     "守的是別的屬性（r79）": ('if hasattr(manager, "other"): pass\nr = manager.brand_new()\n', 1),
     "守護寫在用法之後（r79）": ('r = manager.brand_new()\nok = hasattr(manager, "brand_new")\n', 1),
@@ -173,6 +248,20 @@ SELF_B = {
     "賦值目標（把屬性換掉）不算用法": ("manager.brand_new = lambda: 1\n", 0),
     "條件運算式：守護寫在後面但先判斷": ('f = manager.brand_new if hasattr(manager, "brand_new") else None\n', 0),
     "條件運算式：守的是別的屬性": ('f = manager.brand_new if hasattr(manager, "other") else None\n', 1),
+    "條件運算式跨行寫（r81：比行號會誤報）": ('f = (manager.brand_new\n     if hasattr(manager, "brand_new") else None)\n', 0),
+    "用法在條件運算式的 else 那邊（r81）": ('f = None if hasattr(manager, "brand_new") else manager.brand_new\n', 1),
+    "用法在 if … else: 的 else 區塊（r81）": ('if hasattr(manager, "brand_new"):\n    pass\nelse:\n    manager.brand_new()\n', 1),
+    "or 後段（r81）": ('ok = hasattr(manager, "brand_new") or manager.brand_new()\n', 1),
+    "not 底下（r81）": ('ok = not hasattr(manager, "brand_new") and manager.brand_new()\n', 1),
+    "isinstance(getattr(...), dict) 當條件": ('if isinstance(getattr(manager, "brand_new", None), dict): manager.brand_new["x"] = 1\n', 0),
+    "前面定義的函式裡守過（定義不等於執行，r81）": ('def f():\n    return hasattr(manager, "brand_new")\nmanager.brand_new()\n', 1),
+    "前一個情境守過（範圍不越界）": ('fx = fresh()\nif hasattr(manager, "brand_new"): pass\nfx = fresh()\nmanager.brand_new()\n', 1),
+    "前面只是出現過守護（例如前提 check），擋不住（r82）": ('check("A", "（前提）", hasattr(manager, "brand_new"))\nmanager.brand_new()\n', 1),
+    "前面 `if not hasattr: return` 擋得住": ('def f():\n    if not hasattr(manager, "brand_new"): return\n    manager.brand_new()\n', 0),
+    "外層區塊前面 `if not hasattr: continue`": ('for i in range(2):\n    if not hasattr(manager, "brand_new"): continue\n    if i: manager.brand_new()\n', 0),
+    "前面 `if not hasattr: pass`（沒離開）擋不住": ('if not hasattr(manager, "brand_new"): pass\nmanager.brand_new()\n', 1),
+    "跟別名同名的區域變數不是那個模組（r81）": ('for manager in [1]:\n    manager.brand_new\n', 0),
+    "函式參數同名也不是": ('def f(manager):\n    return manager.brand_new\n', 0),
 }
 
 def self_test():
@@ -180,6 +269,9 @@ def self_test():
     for name, (src, want) in SELF_A.items():
         n = len(crash_guards(src)); ok = n == want; bad += not ok
         print(f"  {'✅' if ok else '❌'} A：{name}（問題 {n}，預期 {want}）")
+    for name, (src, want) in SELF_C.items():
+        n = len(reset_then_use(src, SELF_B_ALIAS | {"store": "store"})); ok = n == want; bad += not ok
+        print(f"  {'✅' if ok else '❌'} C：{name}（問題 {n}，預期 {want}）")
     for name, (src, want) in SELF_B.items():
         n = len(new_interface(src, SELF_B_LEGACY, SELF_B_ALIAS)); ok = n == want; bad += not ok
         print(f"  {'✅' if ok else '❌'} B：{name}（問題 {n}，預期 {want}）")
@@ -191,7 +283,7 @@ def main():
     files = sorted(glob.glob("tests/test_r*.py")); total = 0
     for p in files:
         src = open(p, encoding="utf-8").read()
-        probs = crash_guards(src) + new_interface(src, legacy)
+        probs = crash_guards(src) + new_interface(src, legacy) + reset_then_use(src)
         print(f"== {p}：{len(probs)} 處")
         for o in probs: print("   " + o)
         total += len(probs)
