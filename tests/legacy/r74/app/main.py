@@ -254,6 +254,7 @@ def place(sym, eid, sig, sz, rec):
         qty = f["executed"]                              # 交易所確認的成交量，不是送出的數量（部分成交時兩者不同）
         fill = f["avg"]
         rec["fill"] = fill; rec["qty"] = qty
+        if fill is None: rec["fill_backfill"] = f.get("oid")          # 成交價查不到：記帳後排背景補登（r71）
         rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
         own = dict(store.get().get("open", {}))
         own[sym] = dict(pid=uuid.uuid4().hex[:12], **_param_version(), engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
@@ -265,6 +266,8 @@ def place(sym, eid, sig, sz, rec):
         m0 = manager.mark_now(sym)                             # 起始界線：開倉成交之後成交明細的最後一筆（清單第 8 條 r32）
         if m0 is not None:
             own = dict(store.get().get("open", {})); own[sym] = dict(own[sym], trade_mark=m0); store.update(open=own)
+        if rec.get("fill_backfill") is not None:                       # 開倉成交價查不到 → 背景補登（r71）
+            manager.schedule_entry_backfill(sym, store.get()["open"][sym].get("pid"), rec["fill_backfill"], qty, eid)
     except Exception as e:
         # 帳沒記成：pending 還在，下一輪對帳會照交易所數量認領並立刻掛停損
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {sym} 成交後記帳失敗 {e}")
@@ -445,7 +448,7 @@ def manage(act, sym, eid="?", stop=None):
             mid = (f"，照成交明細結帳{px}" if manager.num(r.get("exit")) else "，成交明細查不到，出場價與損益記未知")
             return dict(ok=True, msg=head + mid + "；這次沒有送平倉單"
                         + ("。交易所上現在那張是別的部位（均價不同，別的專案或 App 開的），沒有動它" if r.get("replaced") else ""))
-        return dict(ok=True, msg=f"{sym} 已平倉" + px)
+        return dict(ok=True, msg=f"{sym} 已平倉" + (px or "，出場價成交明細還查不到，背景會再查幾次、查到補發通知"))
     if act == "adopt":
         if not getattr(store, "LOADED", True): return dict(error=f"{sym} 持倉紀錄還沒載入（狀態檔讀取失敗），不能認領——認領會把部位寫進還沒載入的帳")
         if mine: return dict(error=f"{sym} 已經在帳上，不需要認領")

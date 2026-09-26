@@ -33,11 +33,22 @@ RESET_ATTRS = [(B, "klines"), (B, "_get"), (manager, "_now"), (manager, "retry_s
 RESET_ATTRS = [(m, a) for m, a in RESET_ATTRS if hasattr(m, a)]   # 在舊版程式上重跑測試時（清單用法第 5 點 r32），略過不存在的
 ORIG = {(id(m), a): getattr(m, a) for m, a in RESET_ATTRS}
 
+# 背景補登的「真的那個」另存，只給驗證正式路徑的測試用；數真的開了幾個（清單第 15 條 r75）：
+# 框架預設把排程換成收集器，但只要哪支測試繞過它，補登執行緒就會真的在背景打網路、把「未知」補成已知——每支測試結尾數一次，必須是 0。
+import threading as _th
+REAL_START_BACKFILL = getattr(manager, "_start_backfill", None)
+REAL_THREADS = dict(n=0, allowed=0)
+_orig_thread_start = _th.Thread.start
+def _counting_start(self, *a, **k):
+    if self.name == "補登": REAL_THREADS["n"] += 1
+    return _orig_thread_start(self, *a, **k)
+_th.Thread.start = _counting_start
+
 # 模組層級的可變狀態（計數器、快取、旗標）：匯入時存一份初始值，fresh() 一律還原（第 14 種）。
 # tests/check_tests.py 會比對 app/ 裡所有底線開頭的模組層級 dict／list／set，漏列就失敗——新增狀態不用靠記得（r44）。
 import copy as _copy
 from app import risk as _risk, signals as _signals, presets as _presets
-RESET_STATE = [(B, "_mode"), (B, "_algo"), (main, "_rc"), (main, "_loop_errs"), (main, "_fail"), (manager, "_missing"),
+RESET_STATE = [(B, "_mode"), (B, "_algo"), (main, "_rc"), (main, "_loop_errs"), (main, "_fail"), (main, "_resumed"), (manager, "_missing"),
                (manager, "_errs"), (preflight, "_last"), (_presets, "_fail"), (_risk, "_bal"), (_signals, "_state_b"),
                (store, "_load_fail"), (store, "_fail"), (telegram, "_unset")]
 RESET_STATE = [(m, a) for m, a in RESET_STATE if hasattr(m, a)]      # 舊版程式上重跑時略過不存在的（r35）
@@ -178,5 +189,8 @@ def finish(allowed=()):
     scanned = ALL_ERR + STDERR.lines                     # 錯誤區、推播、標準錯誤（traceback）都掃
     bugs = [x for x in scanned if any(k in x for k in BUG_MARKS) and not any(a in x for a in allowed)]
     check("H10", "所有情境的錯誤區與推播裡，沒有非注入的程式錯誤", not bugs, f"{bugs[:3]}")
+    extra = REAL_THREADS["n"] - REAL_THREADS["allowed"]
+    check("H10", "整支測試沒有真的開背景補登執行緒（框架預設收下來不跑；刻意驗證正式路徑的另計）", extra == 0,
+          f"真的開了 {REAL_THREADS['n']} 個、刻意的 {REAL_THREADS['allowed']} 個")
     print("\n全部通過" if not fails else f"\n{len(fails)} 項失敗：{sorted(set(fails))}")
     sys.exit(1 if fails else 0)

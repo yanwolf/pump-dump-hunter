@@ -12,7 +12,7 @@
 """
 import os, re, subprocess, sys
 
-TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27", "tests.test_r30", "tests.test_r33", "tests.test_r36", "tests.test_r39", "tests.test_r43", "tests.test_r47", "tests.test_r50", "tests.test_maxqty", "tests.test_r53", "tests.test_r56", "tests.test_r58", "tests.test_r61", "tests.test_r64", "tests.test_stats", "tests.test_r71", "tests.test_r73"]
+TESTS = ["tests.test_r12", "tests.test_r15", "tests.test_r18", "tests.test_r21", "tests.test_r24", "tests.test_r27", "tests.test_r30", "tests.test_r33", "tests.test_r36", "tests.test_r39", "tests.test_r43", "tests.test_r47", "tests.test_r50", "tests.test_maxqty", "tests.test_r53", "tests.test_r56", "tests.test_r58", "tests.test_r61", "tests.test_r64", "tests.test_stats", "tests.test_r71", "tests.test_r73", "tests.test_r75"]
 LINE = re.compile(r"^  (✅|❌) \[[^\]]+\] (.+?)(?:　.*?)?(?:〔命中(\d+)〕)?(?:〔基礎設施〕)?$", re.M)
 
 def parse(stdout):

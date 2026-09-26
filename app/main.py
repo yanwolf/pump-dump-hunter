@@ -257,7 +257,8 @@ def place(sym, eid, sig, sz, rec):
         if fill is None: rec["fill_backfill"] = f.get("oid")          # 成交價查不到：記帳後排背景補登（r71）
         rec["slip_pct"] = round((fill / sig.entry - 1) * 100 * (-1 if is_long else 1), 3) if fill else None   # 負=比訊號價差（對自己不利）
         own = dict(store.get().get("open", {}))
-        own[sym] = dict(pid=uuid.uuid4().hex[:12], **_param_version(), engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
+        own[sym] = dict(pid=uuid.uuid4().hex[:12], **_param_version(), entry_oid=f.get("oid"), entry_exec=qty,   # 重啟後重新排進場補登要用（r75）
+                        engine=eid, side=sig.side, time=rec["time"], ts=now_ms - 5000,
                         bar_t=rec.get("bar_t"), last_t=rec.get("bar_t"), r_unit=abs(sig.entry - stop_px),   # R 用取整後的停損算（第 4 條）
                         entry=sig.entry, fill=fill, stop=stop_px, qty=qty, base_qty=base_qty,
                         risk_usdt=round(abs(sig.entry - stop_px) * qty, 4), state="初始")
@@ -325,6 +326,7 @@ def run_tick(state):
     _loop_step("整輪", lambda: tick(state))
 
 _loop_errs = {}
+_resumed = {}                    # 重啟後重新排背景補登：每個行程只做一次（狀態檔讀到之後）
 
 ENGINE_LOCK = manager.ENGINE_LOCK        # 引擎鎖在 manager（對帳、出場管理、下單都用裝飾器套上），網頁交易操作也拿這一把
 
@@ -353,6 +355,9 @@ def _scan(state):
 def tick(state):
     """背景迴圈的一輪：掃描 → 對帳 → 出場管理與守衛 → 訊號與下單，四步各自 try。"""
     if not getattr(store, "LOADED", True): _loop_step("載入狀態", store.retry_load)   # 讀取失敗後每輪重試（r38）
+    if getattr(store, "LOADED", True) and not _resumed.get("done"):
+        _resumed["done"] = True                                         # 先標記：出錯也只推一次，不每輪重排
+        _loop_step("重排補登", manager.resume_backfills)                  # 重啟後照狀態檔裡的記號重新排（r75）
     _loop_step("掃描", lambda: _scan(state))
     if TRADE and C.API_KEY:
         _loop_step("對帳", lambda: reconcile(force=True))       # 先對帳（被停損掉的移除）

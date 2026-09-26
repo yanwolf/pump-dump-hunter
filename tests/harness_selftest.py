@@ -41,6 +41,12 @@ CASES = {
         'left = [f"{m.__name__}.{a}" for m, a in RESET_STATE if "__探針__" in getattr(m, a)]\n'
         'print("探針數", len(RESET_STATE), "殘留", left)\ntelegram.send("x")\n'
         'check("A", "全部消失", len(RESET_STATE) >= 10 and not left)\nfinish()\n', 0, "殘留 []"),
+    "繞過框架預設、真的開了補登執行緒 → 結尾報出來（數得到才算有檢查，r75）": (
+        'from tests.harness import REAL_START_BACKFILL\nimport time as _t\nfx = fresh()\n'
+        'manager._start_backfill = REAL_START_BACKFILL\nmanager._start_backfill(lambda: None)\n_t.sleep(0.2)\n'
+        'telegram.send("x")\ncheck("A", "a", True)\nfinish()\n', 1, "真的開了 1 個"),
+    "沒開補登執行緒 → 這一項通過": (
+        'fx = fresh()\ntelegram.send("x")\ncheck("A", "a", True)\nfinish()\n', 0, "真的開了 0 個"),
     "一般項目印這個情境的命中次數": (
         'fx = fresh()\nfx.mut_hits = 3\ntelegram.send("x")\ncheck("A", "一般", True)\nfinish()\n', 0, "一般〔命中3〕"),
 }
