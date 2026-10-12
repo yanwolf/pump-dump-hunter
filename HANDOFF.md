@@ -42,8 +42,9 @@ tests/test_r73.py     清單 r72→r73：部分出場查不到時記「還沒認
 tests/test_r75.py     清單 r74→r75：重啟前後（真的存檔、重新載入）部分出場／進場／出場補登重新排；正式路徑真的開執行緒（python -m tests.test_r75）
 tests/test_r77.py     清單 r76→r77：進場補登記號（部位平掉後、重啟後照排；放棄後不再每次重查）（python -m tests.test_r77）
 tests/test_r86.py     清單 r84→r86：重啟前後（真的存檔、重新載入）冷卻、待平倉、部位上執行時長出來的鍵都在；讀寫兩邊沒有過濾（python -m tests.test_r86）
+tests/test_r97.py     清單 r88→r98（第 6 條）：K 線 IP 權重——批次讓路／429 照 Retry-After／418 立刻停、實盤不排隊、事件掃描被限流整個中止不快取（python -m tests.test_r97）
 tests/test_maxqty.py  交易所市價單數量上限（-4005，2026-09-22 SKRUSDT 實單）：開倉壓到上限、平倉分批
-tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版）；python -m tests.rerun_old legacy:rNN
+tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版：r78、r88）；python -m tests.rerun_old legacy:rNN
 tests/check_indexing.py 先索引沒先確認的靜態檢查；--self-test 自我驗證
 tests/rerun_old.py    拿現在的測試跑舊版程式、失敗分三類：python -m tests.rerun_old <舊版目錄>
 舊版程式：部署前 git 打標籤（lessons-rNN），比對時 git worktree add ../pdh-rNN lessons-rNN

@@ -198,7 +198,7 @@ async function sw(){const o=pcollect();
  const r=await (await F('/api/sweep/start?d='+$('sd').value+'&m='+$('sm').value+'&l='+encodeURIComponent(lbl)+'&o='+encodeURIComponent(Object.keys(o).length?JSON.stringify(o):''))).json();
  if(r.error){alert(r.error);return}if(!r.started){alert('已有掃描在跑');return}setTimeout(swload,1500)}
 async function swload(){const o=$('swout');const r=await (await F('/api/sweep')).json();
- const runs=r.runs&&r.runs.length?'<h2 style=margin-top:10px>歷次比較</h2>'+T(r.runs,['label','days','time','n','total','A','B','C','D','E','F','G']):'';
+ const runs=r.runs&&r.runs.length?'<h2 style=margin-top:10px>歷次比較</h2>'+T(r.runs,['label','days','time','n','total','err','A','B','C','D','E','F','G']):'';
  if(!r.status){o.innerHTML='尚未執行'+runs;return}
  let h='<b>'+r.status+'</b>'+runs;
  if(swOpen){

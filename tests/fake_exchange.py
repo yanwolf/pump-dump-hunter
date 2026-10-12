@@ -15,20 +15,23 @@
 - 成交明細（userTrades）開倉、平倉都有，每筆有遞增 id、時間、手續費——跟真的一樣；
   有筆數上限（預設 500、最多 1000），帶 fromId 時從那筆往後；交易所時鐘可以比本機慢（clock_offset_ms）
 另外可以注入：逾時、5xx、指定錯誤碼、「成交了但回應丟失」。
+- IP 權重（清單第 6 條 r97）：K 線照 limit 計權重（<100→1、<500→2、≤1000→5、>1000→10），照 self.clock 每分鐘歸零；
+  超過 weight_cap 回 429（帶 Retry-After 到下一分鐘）；429 冷卻期間還繼續打 → 418 封 IP 120 秒（封鎖期間一律 418）。
+  每個回應都帶 X-MBX-USED-WEIGHT-1M。K 線照 startTime／endTime／limit 產生（kl_bars 可限定有資料的範圍）。
 """
 import json, os, socket, time, urllib.error, urllib.parse, urllib.request
 
 
 class _Resp:
-    def __init__(self, d): self.d = d
+    def __init__(self, d, headers=None): self.d = d; self.headers = headers or {}
     def read(self): return json.dumps(self.d).encode()
     def __enter__(self): return self
     def __exit__(self, *a): pass
 
 
 class _HTTPErr(urllib.error.HTTPError):
-    def __init__(self, url, code, body):
-        super().__init__(url, code, "err", {}, None); self._b = body
+    def __init__(self, url, code, body, headers=None):
+        super().__init__(url, code, "err", headers or {}, None); self._b = body
     def read(self): return self._b.encode()
 
 
@@ -63,6 +66,14 @@ class FakeBinance:
         self._cur_oid = None                # 經過成交（_add／_reduce）或 open() 設定的部位數量；跟 self.pos 不一致 = 測試直接改了數量、沒留成交
         self.trade_queries = []          # 每次查成交明細：{symbol, untraced}（清單用法第 5 點 r33：歸零不留成交）
         self.mut_hits = 0                # 突變命中次數（被突變的查詢在這個情境被呼叫了幾次）
+        # IP 權重（清單第 6 條 r97）
+        self.clock = time.time           # 測試換成虛擬時鐘（跟 binance._clock 同一個）
+        self.weight_cap = 2400
+        self.ipw = dict(minute=None, used=0)
+        self.cool_until = 0.0            # 回 429 之後到這個時間前還打 → 418
+        self.ban_until = 0.0
+        self.kl_calls = []               # 每次 K 線請求：dict(t, symbol, interval, limit, status, used)
+        self.kl_bars = None              # callable(symbol, interval) → (最早, 最晚) 開盤毫秒；None = 任何區間都有資料
 
     # ---------- 狀態輔助 ----------
     def open(self, symbol, side, qty, entry=None):
@@ -111,7 +122,36 @@ class FakeBinance:
         FakeBinance.current = self       # 測試的 check() 用來印出這個情境的突變命中次數
         return self
 
-    def _err(self, url, code, body): raise _HTTPErr(url, code, body)
+    def _err(self, url, code, body, headers=None): raise _HTTPErr(url, code, body, dict(self._hdr(), **(headers or {})))
+
+    def _hdr(self):
+        return {"X-MBX-USED-WEIGHT-1M": str(self.ipw["used"])}
+
+    @staticmethod
+    def kl_weight(limit):
+        limit = int(limit)
+        return 1 if limit < 100 else 2 if limit < 500 else 5 if limit <= 1000 else 10
+
+    def _kl_gate(self, url, p):
+        """K 線的 IP 權重：照真的幣安——超過上限 429、429 之後繼續打 418、封鎖期間 418。"""
+        now = self.clock(); m = int(now // 60)
+        if self.ipw["minute"] != m: self.ipw.update(minute=m, used=0)
+        rec = dict(t=now, symbol=p.get("symbol"), interval=p.get("interval"), limit=int(p.get("limit", 500)))
+        self.kl_calls.append(rec)
+        if now < self.ban_until:
+            rec.update(status=418, used=self.ipw["used"])
+            self._err(url, 418, '{"code":-1003,"msg":"Way too many requests; IP banned"}', {"Retry-After": str(int(self.ban_until - now) + 1)})
+        if now < self.cool_until:
+            self.ban_until = now + 120
+            rec.update(status=418, used=self.ipw["used"])
+            self._err(url, 418, '{"code":-1003,"msg":"Way too many requests; IP banned"}', {"Retry-After": "120"})
+        self.ipw["used"] += self.kl_weight(rec["limit"])
+        rec["used"] = self.ipw["used"]
+        if self.ipw["used"] > self.weight_cap:
+            self.cool_until = (m + 1) * 60
+            rec["status"] = 429
+            self._err(url, 429, '{"code":-1003,"msg":"Too many requests"}', {"Retry-After": str(int(self.cool_until - now) + 1)})
+        rec["status"] = 200
 
     def _urlopen(self, req, timeout=None):
         url = req.full_url
@@ -120,6 +160,7 @@ class FakeBinance:
         raw = (req.data or b"").decode() or (url.split("?", 1)[1] if "?" in url else "")
         params = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
         self.calls.append((method, path, params))
+        if path == "/fapi/v1/klines": self._kl_gate(url, params)
         # 突變命中：被突變的函式（逐幣部位查詢）在這個情境被「呼叫」了幾次——不管最後是注入還是突變回的（清單用法第 5 點 r23）。
         # 只算突變分支實際執行的次數會漏掉「情境自己的注入先回了空清單」的項目，把它們錯判成「無關」。
         if self.mutate == "no_base" and path == "/fapi/v2/positionRisk" and "symbol" in params: self.mut_hits += 1
@@ -141,10 +182,20 @@ class FakeBinance:
             if rule["kind"] == "empty": return _Resp([])      # 200 加空清單（維護、閘門異常，清單第 2 條 r15）
             self._err(url, rule["code"], rule.get("body", ""))
 
-        return _Resp(self._route(url, path, method, params))
+        return _Resp(self._route(url, path, method, params), self._hdr())
 
     # ---------- 路由 ----------
     def _route(self, url, path, method, p):
+        if path == "/fapi/v1/klines":
+            iv = {"1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000, "1d": 86400000}[p["interval"]]
+            lim = int(p.get("limit", 500)); end = int(p.get("endTime") or self.clock() * 1000)
+            start = int(p["startTime"]) if "startTime" in p else end - lim * iv
+            t, rows = -(-start // iv) * iv, []
+            while t <= end and len(rows) < lim:
+                px = str(self.price); rows.append([t, px, px, px, px, "1", t + iv - 1, "1", 0, "0", "0", "0"]); t += iv
+            if self.kl_bars:
+                lo, hi = self.kl_bars(p["symbol"], p["interval"]); rows = [r for r in rows if lo <= r[0] <= hi]
+            return rows
         if path == "/fapi/v1/positionSide/dual": return {"dualSidePosition": self.hedge}
         if path == "/fapi/v2/positionRisk":
             if "symbol" in p:

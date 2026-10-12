@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-09-26r88"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
+VERSION = "2026-10-12r98"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):
@@ -26,6 +26,17 @@ def check(trade=False):
         f = B.filters("BTCUSDT")
         add("精度過濾器", "ok" if f and f.get("tick") else "fail", f"tick={f.get('tick')} step={f.get('step')}")
     except Exception as e: add("精度過濾器", "fail", e)
+
+    # 第 6 條 r97：公開行情一樣算 IP 權重。抓一根 1 分 K（權重 1）拿這一分鐘的已用權重；封鎖中不送請求
+    try:
+        B.klines("BTCUSDT", "1m", 2)
+        rs = B.rate_status()
+        st = "warn" if (rs["cool"] or rs["used"] > rs["soft"]) else "ok"
+        add("IP 權重（K 線）", st, f"這一分鐘已用 {rs['used']}/{rs['cap']}（批次讓路線 {rs['soft']}）；累計 429 {rs['n429']} 次、418 {rs['n418']} 次、"
+            f"批次等待 {rs['waits']} 次共 {rs['waited']} 秒" + (f"；429 冷卻還要 {rs['cool']} 秒" if rs["cool"] else ""))
+    except B.IPBanned as e: add("IP 權重（K 線）", "fail", f"IP 被封鎖（418）：{e}——實盤 K 線、對帳也會一起失敗")
+    except B.RateLimited as e: add("IP 權重（K 線）", "warn", f"被限流（429）：{e}")
+    except Exception as e: add("IP 權重（K 線）", "warn", f"檢查失敗 {e}")
 
     if not C.API_KEY:
         add("API 金鑰", "warn", "未設定，以下需要簽章的項目略過")

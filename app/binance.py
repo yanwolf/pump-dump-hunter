@@ -1,14 +1,77 @@
 """純標準庫的 Binance Futures 客戶端。公開資料不需 key；下單需要。"""
-import decimal, hashlib, hmac, json, re, time, urllib.error, urllib.parse, urllib.request
+import contextlib, decimal, hashlib, hmac, json, re, threading, time, urllib.error, urllib.parse, urllib.request
 from . import config as C
 
+# ---- IP 權重與限流（清單第 6 條 r97）----
+# 公開行情端點不用金鑰，但一樣算 IP 權重：K 線 limit=1500 一次 10，合約每分鐘上限 2400。
+# 回測／事件掃描（sweep 子程序）連續抓 1 分 K，一分鐘內就能打滿 → 429；429 之後繼續打 → 418 封 IP，
+# 同一個出口 IP 上的實盤（K 線、對帳、下單）會一起被封。
+class RateLimited(RuntimeError):
+    """幣安限流（429）。暫時性的——稍後再抓就有；**不能**當成「這段期間沒有資料」。
+    訊息保留 "HTTP 429 …" 開頭，definite_reject() 照樣把被限流的下單判成「明確被拒」。"""
+
+class IPBanned(RateLimited):
+    """418：IP 被封。不重試；封鎖期間這個程序不再打 K 線（繼續打會延長封鎖）。"""
+
+KL_CAP = 2400                  # 幣安合約每分鐘 IP 權重上限
+KL_SOFT = KL_CAP // 2          # 批次抓 K 線（回測、事件掃描）用到一半就等下一分鐘，另一半留給實盤
+KL_RETRY = 3                   # 429 照 Retry-After 等完重試的次數上限（批次才重試）
+KL_WAIT_MAX = 120              # 單次最多等幾秒
+_RL = dict(used=0, minute=-1, cool_until=0.0, ban_until=0.0, n429=0, n418=0, waits=0, waited=0.0, last="")
+_KL_BATCH = threading.Lock()   # 批次 K 線排隊：一次一個請求（含等待）；實盤的 K 線不排這條隊，不會被研究端的等待卡住
+_clock = time.time             # 測試換成虛擬時鐘
+
+def _sleep(s): time.sleep(s)
+
+def kline_weight(limit):
+    """幣安合約 K 線的權重：limit <100 → 1、<500 → 2、≤1000 → 5、>1000 → 10。"""
+    limit = int(limit)
+    return 1 if limit < 100 else 2 if limit < 500 else 5 if limit <= 1000 else 10
+
+def _hdr(headers, name):
+    try: return (headers or {}).get(name)
+    except Exception: return None
+
+def _note(headers, code=200):
+    """每個幣安回應都記：標頭的已用權重；429 → 冷卻到 Retry-After（最多 120 秒）；418 → 封鎖到 Retry-After。
+    下單、查部位的回應也記——它們被 429／418，K 線一樣要停。"""
+    now = _clock()
+    try: used = int(_hdr(headers, "X-MBX-USED-WEIGHT-1M"))
+    except Exception: used = None
+    if used is not None: _RL.update(used=used, minute=int(now // 60))
+    if code not in (418, 429): return
+    try: ra = float(_hdr(headers, "Retry-After") or 0)
+    except Exception: ra = 0.0
+    if code == 418:
+        _RL["ban_until"] = max(_RL["ban_until"], now + (ra or KL_WAIT_MAX)); _RL["n418"] += 1
+    else:
+        _RL["cool_until"] = max(_RL["cool_until"], now + min(ra or 60.0, KL_WAIT_MAX)); _RL["n429"] += 1
+    _RL["last"] = time.strftime("%m-%d %H:%M:%S", time.localtime(now)) + f" HTTP {code}"
+
+def rate_status():
+    """給網頁與自檢看的：最近一次回應的已用權重、冷卻／封鎖剩幾秒、累計 429／418 與等待。"""
+    now = _clock()
+    return dict(used=_RL["used"] if _RL["minute"] == int(now // 60) else 0, cap=KL_CAP, soft=KL_SOFT,
+                cool=max(0, int(_RL["cool_until"] - now)), ban=max(0, int(_RL["ban_until"] - now)),
+                n429=_RL["n429"], n418=_RL["n418"], waits=_RL["waits"], waited=round(_RL["waited"]), last=_RL["last"])
+
+def _wait(s, why):
+    s = max(0.0, min(float(s), KL_WAIT_MAX))
+    _RL["waits"] += 1; _RL["waited"] += s
+    _sleep(s)
+
 def _open(req):
-    """把 Binance 的錯誤內文帶出來，否則只看到 HTTP 400 不知道哪裡錯。"""
+    """把 Binance 的錯誤內文帶出來，否則只看到 HTTP 400 不知道哪裡錯。429 → RateLimited、418 → IPBanned（都是 RuntimeError）。"""
     try:
-        with urllib.request.urlopen(req, timeout=15) as r: return json.loads(r.read())
+        with urllib.request.urlopen(req, timeout=15) as r:
+            _note(getattr(r, "headers", None))
+            return json.loads(r.read())
     except urllib.error.HTTPError as e:
+        _note(e.headers, e.code)
         try: msg = e.read().decode()[:300]
         except Exception: msg = ""
+        if e.code == 418: raise IPBanned(f"HTTP 418 {msg}") from None
+        if e.code == 429: raise RateLimited(f"HTTP 429 {msg}") from None
         raise RuntimeError(f"HTTP {e.code} {msg}") from None
 
 def _get(path, params=None, base=None, signed=False):
@@ -59,24 +122,53 @@ def funding_all():
 def oi_hist(symbol, period="1h", limit=25):
     return _get("/futures/data/openInterestHist", dict(symbol=symbol, period=period, limit=limit))
 
-def klines(symbol, interval="5m", limit=500, start=None, end=None):
+def _kl_get(p, batch):
+    """K 線請求（清單第 6 條 r97）。
+    - 418 封鎖中：不送，直接 IPBanned。
+    - 429 冷卻中：批次等到冷卻結束；實盤不等，直接 RateLimited（這輪沒抓到，下一輪再來）。
+    - 批次：這一分鐘已用權重 + 這次的權重超過一半 → 等到下一分鐘再送；整個程序的批次請求排隊（_KL_BATCH）。
+    - 429：批次照 Retry-After 等完重試，最多 KL_RETRY 次，還是被擋就拋 RateLimited——呼叫端不能當成沒資料。"""
+    w = kline_weight(p.get("limit", 500))
+    with (_KL_BATCH if batch else contextlib.nullcontext()):
+        tries = 0
+        while True:
+            now = _clock()
+            if now < _RL["ban_until"]:
+                raise IPBanned(f"幣安 418 封鎖中（還要 {int(_RL['ban_until'] - now)} 秒），這段期間不打 K 線")
+            if now < _RL["cool_until"]:
+                if not batch:
+                    raise RateLimited(f"幣安 429 冷卻中（還要 {int(_RL['cool_until'] - now)} 秒），這輪 K 線沒抓——不是沒有資料")
+                _wait(_RL["cool_until"] - now + 0.5, "429"); continue
+            if batch and _RL["minute"] == int(now // 60) and _RL["used"] + w > KL_SOFT:
+                _wait(60 - now % 60 + 1, "soft"); continue
+            try:
+                return _get("/fapi/v1/klines", p)
+            except IPBanned:
+                raise
+            except RateLimited as e:
+                tries += 1
+                if not batch or tries > KL_RETRY:
+                    raise RateLimited(f"幣安限流，K 線重試 {tries - 1} 次仍被擋（暫時性，不是沒有資料）：{e}") from None
+
+def klines(symbol, interval="5m", limit=500, start=None, end=None, batch=False):
+    """batch=True：回測、事件掃描這類一次抓很多的（讓路給實盤、429 會等）；預設是實盤用的（不等）。"""
     p = dict(symbol=symbol, interval=interval, limit=min(limit, 1500))
     if start: p["startTime"] = int(start)
     if end: p["endTime"] = int(end)
-    rows = _get("/fapi/v1/klines", p)
+    rows = _kl_get(p, batch)
     return [dict(t=r[0], o=float(r[1]), h=float(r[2]), l=float(r[3]), c=float(r[4]), v=float(r[5]))
             for r in rows]
 
 def klines_range(symbol, interval, start_ms, end_ms):
-    """分頁抓完整區間，回測用。"""
+    """分頁抓完整區間，回測用（批次）。中途被限流 → 拋 RateLimited，不回「抓到一半」的資料。"""
     out, cur = [], start_ms
     while cur < end_ms:
-        batch = klines(symbol, interval, 1500, cur, end_ms)
+        batch = klines(symbol, interval, 1500, cur, end_ms, batch=True)
         if not batch: break
         out.extend(batch)
         cur = batch[-1]["t"] + 1
         if len(batch) < 1500: break
-        time.sleep(0.2)
+        _sleep(0.2)
     return out
 
 def wallet_balance(asset="USDT"):
