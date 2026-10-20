@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-10-12r98"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
+VERSION = "2026-10-20r99"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):
@@ -78,6 +78,11 @@ def check(trade=False):
             lines.append(f"{sym} 帳上 {rec.get('fill'):.6g}／交易所 {e:.6g}（{why}）")
         add("帳上成交價與交易所均價", "warn" if lines else "ok", "；".join(lines) if lines else "持倉的帳上成交價都跟交易所均價一致")
     except Exception as e: add("帳上成交價與交易所均價", "warn", f"檢查失敗 {e}")
+
+    # 已放棄追蹤（清單第 16 條 r99）：另列，不混進「交易所上的其他部位」
+    ab = store.get().get("abandoned") or {}
+    add("已放棄追蹤", "warn" if ab else "ok",
+        "；".join(f"{k} {v.get('side')} {v.get('qty')}（{v.get('at')} 起）" for k, v in ab.items()) + "——交易所那一側清空後自動解除" if ab else "沒有")
 
     # 推播設定：沒設的話所有告警都不會送出（清單第 8 條 r39）
     from . import telegram as _tg

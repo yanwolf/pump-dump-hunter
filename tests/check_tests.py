@@ -26,7 +26,12 @@ def reset_names():
 def negative(expr):
     if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not): return True
     # all(...) 對空清單是 True：程式什麼都沒做（清單是空的）也成立，跟否定句一樣（r44）
-    if isinstance(expr, ast.Call) and getattr(expr.func, "id", "") == "all": return True
+    if isinstance(expr, ast.Call) and getattr(expr.func, "id", "") == "all":
+        # 迭代的是寫死、不會空的字面清單／元組（例如 all(k in page for k in ("a", "b"))）：不會因為「沒東西」而成立，是正向斷言（r99）
+        g = expr.args[0] if expr.args else None
+        if isinstance(g, (ast.GeneratorExp, ast.ListComp)) and all(isinstance(c.iter, (ast.List, ast.Tuple)) and c.iter.elts for c in g.generators):
+            return False
+        return True
     if isinstance(expr, ast.Compare):
         for op, right in zip(expr.ops, expr.comparators):
             if isinstance(op, ast.NotIn): return True
@@ -96,6 +101,8 @@ manager.foo = 1
 check("Z", "只有否定句", not fx.calls)
 check("Z", "all() 對空清單成立", all(c for c in fx.calls))
 fx = fresh()
+check("Z", "all() 迭代寫死的非空元組：是正向斷言，不該被當成否定句", all(k in "abc" for k in ("a", "b")))
+fx = fresh()
 why = "x"
 check("Z", f"（前提）{why}：f-string 的前提也要認得", len(fx.calls) >= 0)
 check("Z", "f-string 前提之後的否定句不該被報", not fx.calls)
@@ -130,6 +137,7 @@ def main():
     need = ["RESET_ATTRS 沒有它", "否定句斷言沒有前提", "沒有任何正向斷言", "結尾沒有呼叫 finish()"]
     if sum("否定句斷言沒有前提" in c for c in canary) < 2: missing_all = ["all() 沒被當成否定句"]
     elif any("f-string 前提之後的否定句" in c for c in canary): missing_all = ["f-string 描述的前提沒認出來"]
+    elif any("迭代寫死的非空元組" in c for c in canary): missing_all = ["all() 迭代寫死的非空元組被誤判成否定句"]
     else: missing_all = []
     missing = [k for k in need if not any(k in c for c in canary)] + missing_all
     print(f"金絲雀（已知有問題的人造測試）：報出 {len(canary)} 個問題" + ("，四種都抓到" if not missing else f"，漏掉 {missing}"))

@@ -74,10 +74,11 @@ def compute(trades):
     )
 
 def report(closed):
-    closed = list(closed or [])
+    excluded = [t for t in (closed or []) if t.get("excluded")]           # 停止追蹤的（不是策略出場，r99）：不算進任何統計
+    closed = [t for t in (closed or []) if not t.get("excluded")]
     engines = sorted({t.get("engine") for t in closed if t.get("engine")})
     out = OrderedDict(scope=dict(n=len(closed), first=closed[0].get("closed") if closed else None,
-                                 last=closed[-1].get("closed") if closed else None, kept=300))
+                                 last=closed[-1].get("closed") if closed else None, kept=300, excluded=len(excluded)))
     out["engines"] = OrderedDict([("全部", compute(closed))] + [(e, compute([t for t in closed if t.get("engine") == e])) for e in engines])
     vers = []
     for t in closed:

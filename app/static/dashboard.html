@@ -124,7 +124,7 @@ function PERF(st){
  const sy=st.symbols||[], worst=sy.filter(x=>x.total_r!=null&&x.total_r<0).slice(0,8), best=sy.filter(x=>x.total_r!=null&&x.total_r>0).slice(-8).reverse();
  const srow=x=>[x.symbol,x.engines,x.total,x.win_rate==null?'—':x.win_rate+'%',c(x.total_r,2,'R'),c(x.pnl),x.unknown||''];
  const syh=['幣','引擎','筆數','勝率','累計','損益 U','未知'];
- return `<div class=card><h2>績效統計 <span class=meta>最近 ${st.scope.n} 筆（${st.scope.first} ～ ${st.scope.last}；帳上保留最近 ${st.scope.kept} 筆）</span></h2>
+ return `<div class=card><h2>績效統計 <span class=meta>最近 ${st.scope.n} 筆（${st.scope.first} ～ ${st.scope.last}；帳上保留最近 ${st.scope.kept} 筆${st.scope.excluded?`；另有 ${st.scope.excluded} 筆停止追蹤，不計入`:''}）</span></h2>
   <div class=meta style=margin-bottom:6px>以 R 為核心：C 每筆風險 2%、F／G 1%，同樣的 U 在不同引擎意義不同。期望值＝平均 R；獲利因子＝總賺 R ÷ 總賠 R；最大回撤＝累計 R 從高點回落最多的一段（游標停在上面看起訖）。損益未知的不算輸贏、不當 0。</div>
   ${main}
   <h3 class=meta style="margin:12px 0 4px">參數版本 × 引擎（每筆開倉時記下當下的實盤參數；沒有記錄的是「舊版（未記錄）」）</h3>${ver}
@@ -166,7 +166,14 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
    ${T(s.observe,wcols)}</div>
  <div class=card><h2>錯誤與警告</h2><div class=meta>${(s.errors||[]).slice(-8).reverse().join('<br>')||'（無）'}</div></div>`;
  const sig=s.signals.slice().reverse();
- $('t_open').innerHTML=`<div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','fill','stop','qty','state','adopted'])}</div>`;
+ const pend=Object.entries(s.open||{}).filter(([k,v])=>v.want_close);
+ const tt=ms=>ms?new Date(ms).toLocaleTimeString('zh-TW',{hour12:false}):'';
+ $('t_open').innerHTML=`<div class=card><h2>本策略持倉</h2>${T(Object.entries(s.open||{}).map(([k,v])=>({symbol:k,...v})),['symbol','engine','side','time','fill','stop','qty','state','adopted'])}</div>`
+  +(pend.length?`<div class=card><h2>待平倉</h2>${pend.map(([k,v])=>`<div style="margin:6px 0">${k} 引擎${v.engine}（${v.want_close}）：重試 ${v.close_fail||0} 次`
+   +(v.reject_n?`、交易所明確拒絕 -2022 連續 ${v.reject_n} 次`:'')
+   +(v.stuck_at?` · <span class=hot>卡住（${tt(v.stuck_at)} 起），下次重試 ${tt(v.next_retry)}</span>`:'')
+   +(v.reject_err?`<div class=meta>${v.reject_err}</div>`:'')
+   +(v.stuck_at?` <button onclick="abandon('${k}')">停止追蹤此部位</button>`:'')+'</div>').join('')}</div>`:'');
  const ex=s.exchange||[];
  $('t_ex').innerHTML=T(ex,['symbol','owner','amt','entry','upnl','upnl_mine','base']);
  document.querySelectorAll('#t_ex tr').forEach((tr,i)=>{if(i&&ex[i-1]){tr.style.cursor='pointer';tr.onclick=()=>{$('mx').value=ex[i-1].symbol;$('mout').innerHTML=''}}});
@@ -236,6 +243,10 @@ async function mpos(act){const o=$('mout');const sym=$('mx').value;if(!sym){o.in
  if(!confirm((act=='close'?'平倉 ':'認領 ')+sym+'？'))return;o.innerHTML='處理中…';
  const r=await (await F('/api/pos?act='+act+'&s='+encodeURIComponent(sym)+'&e='+encodeURIComponent($('me').value||'?')+'&stop='+encodeURIComponent($('ms').value||''))).json();
  o.innerHTML=r.error?'<span style=color:var(--down)>'+r.error+'</span>':r.msg;if(!r.error){$('ms').value='';$('mx').value=''}load()}
+async function abandon(sym){
+ if(!confirm(sym+' 停止追蹤？帳上移除、記一筆排除的損益未知；交易所上的部位與掛單都不動，要自己到幣安處理。'))return;
+ const r=await (await F('/api/pos?act=abandon&s='+encodeURIComponent(sym))).json();
+ alert(r.error?r.error:r.msg);load()}
 async function pf(){const o=$('pfout');o.innerHTML='檢查中…';
  const r=await (await F('/api/preflight')).json();
  if(r.error){o.innerHTML='<span style=color:var(--down)>'+r.error+'</span>';return}

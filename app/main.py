@@ -170,8 +170,21 @@ def reconcile(force=False):
     store.update(exchange=[dict(symbol=p["symbol"], amt=float(p["positionAmt"]), entry=round(float(p["entryPrice"]), 8),
                                 upnl=round(float(p.get("unRealizedProfit") or 0), 2), upnl_mine=_mine_upnl(p),
                                 base=(still.get(p["symbol"]) or {}).get("base_qty") or None,
-                                owner="本策略" if p["symbol"] in still and still[p["symbol"]].get("side") == B.side_of(p) else "其他")
+                                owner="本策略" if p["symbol"] in still and still[p["symbol"]].get("side") == B.side_of(p)
+                                      else ("已放棄追蹤" if p["symbol"] in (store.get().get("abandoned") or {}) else "其他"))
                           for p in ex])
+    # 已放棄追蹤的幣：交易所那一側確實清空了才解除（逐幣確認；查不到不解除，r99）
+    ab = dict(store.get().get("abandoned") or {})
+    for sym, a in list(ab.items()):
+        try:
+            rows = [p for p in ex if p["symbol"] == sym] or B.position_rows(sym)
+            q = sum(abs(float(p["positionAmt"])) for p in rows if B.side_of(p) == a.get("side"))
+        except Exception as e:
+            _log_err = f"{sym} 已放棄追蹤，確認交易所那一側時查不到（{str(e)[:60]}），先不解除"; print(_log_err); continue
+        if q <= 1e-9:
+            ab.pop(sym)
+            _say(lambda: f"✅ {sym} 交易所那一側清空了，解除停止追蹤（可以再進場）", sym)
+    if ab != (store.get().get("abandoned") or {}): store.update(abandoned=ab)
     _rc.update(t=time.time(), n=len(still) + len(pend), ex=ex)
     return len(still) + len(pend), ex
 
@@ -189,6 +202,8 @@ def place(sym, eid, sig, sz, rec):
     _own, _pend = store.get().get("open", {}), store.get().get("pending", {})
     if sym in _own:
         rec["skipped"] = f"這檔已有部位（引擎{_own[sym].get('engine')}），不重複開倉"; return rec
+    if sym in (store.get().get("abandoned") or {}):
+        rec["skipped"] = "這檔已放棄追蹤（交易所一直拒絕平倉），交易所那一側清空前不再進場"; return rec
     if sym in _pend:
         rec["skipped"] = f"這檔已有一筆正在等確認的單（引擎{_pend[sym].get('engine')}），不重複開倉"; return rec
     if len(_own) + len(_pend) >= C.SIZING["max_positions"]:
@@ -391,6 +406,8 @@ def _signals(state):
                     rec["skipped"] = f"本策略已持有此幣（引擎{mine[s].get('engine')}）"
                 elif s in store.get().get("pending", {}):
                     rec["skipped"] = "上一張單結果還沒確認（等對帳）"
+                elif s in (store.get().get("abandoned") or {}):
+                    rec["skipped"] = "這檔已放棄追蹤，交易所那一側清空前不再進場"
                 elif n_own >= C.SIZING["max_positions"]:
                     rec["skipped"] = f"本策略持倉已 {n_own} 筆"
                 elif any(p["symbol"] == s for p in ex):
@@ -455,6 +472,7 @@ def manage(act, sym, eid="?", stop=None):
             return dict(ok=True, msg=head + mid + "；這次沒有送平倉單"
                         + ("。交易所上現在那張是別的部位（均價不同，別的專案或 App 開的），沒有動它" if r.get("replaced") else ""))
         return dict(ok=True, msg=f"{sym} 已平倉" + (px or "，出場價成交明細還查不到，背景會再查幾次、查到補發通知"))
+    if act == "abandon": return manager.abandon(sym)            # 停止追蹤（只有卡住的部位可以，清單第 16 條 r99）
     if act == "adopt":
         if not getattr(store, "LOADED", True): return dict(error=f"{sym} 持倉紀錄還沒載入（狀態檔讀取失敗），不能認領——認領會把部位寫進還沒載入的帳")
         if mine: return dict(error=f"{sym} 已經在帳上，不需要認領")

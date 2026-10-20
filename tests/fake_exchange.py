@@ -57,6 +57,7 @@ class FakeBinance:
         self.seen = set()                # 碰過的幣（全量表會列出它們，數量 0 也列）
         self.orders = {}                 # 市價單：orderId → 訂單（查單、撤單用）
         self.market_max = {}             # 幣 → 市價單最大數量（MARKET_LOT_SIZE.maxQty）；沒設 = 1,000,000
+        self.close_reject = None         # 平倉單（reduceOnly）：None 照常／"reject" 回 -2022（交易所明確拒絕）／"error" 回 503（暫時性錯誤，對照組）
         self.fill_mode = None            # 成交情境：callable(p) → filled／later／never／partial／expired（None = 立刻成交）
         self.strip_avg = None            # callable(p) → True 時，回應不帶 avgPrice／cumQuote（r71）
         self.strip_query = False         # True 時查單也不帶（「查了也沒有」的情境）
@@ -279,6 +280,10 @@ class FakeBinance:
         - 成交情境由 self.fill_mode(p) 決定：filled（立刻成交）／later（回 NEW，第一次查單時才成交）／
           never（一直 NEW，撤單後 CANCELED 成交 0）／partial（先成交 40%，其餘卡著，撤單後 CANCELED 保留已成交）／expired（EXPIRED 成交 0）"""
         self._check_mode(url, p, reduce=False)
+        if p.get("reduceOnly") == "true" and self.close_reject == "reject":       # 交易所明確拒絕平倉（清單第 16 條 r99）
+            self._err(url, 400, '{"code":-2022,"msg":"ReduceOnly Order is rejected."}')
+        if p.get("reduceOnly") == "true" and self.close_reject == "error":        # 對照組：暫時性錯誤
+            self._err(url, 503, "Service Unavailable")
         q = float(p["quantity"])
         if q > self.market_max.get(p["symbol"], 1000000):
             self._err(url, 400, '{"code":-4005,"msg":"Quantity greater than max quantity."}')

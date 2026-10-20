@@ -92,6 +92,12 @@ def definite_reject(e):
     m = re.match(r"HTTP (\d+) (.*)", str(e), re.S)
     return bool(m) and 400 <= int(m.group(1)) < 500 and '"code"' in m.group(2)
 
+def reduce_only_rejected(e):
+    """交易所明確拒絕 reduceOnly 平倉單（-2022 ReduceOnly Order is rejected，清單第 16 條 r99）。
+    同樣的單送幾次都一樣（交易所那邊的狀態卡住了）；跟逾時、5xx 這類暫時性錯誤分開。"""
+    s = str(e)
+    return "-2022" in s or "ReduceOnly Order is rejected" in s
+
 def _mode_err(e):
     return "-4061" in str(e) or "-1106" in str(e)
 

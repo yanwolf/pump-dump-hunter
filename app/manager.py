@@ -398,12 +398,26 @@ def close_now(sym, pos, by):
         pos["want_close"] = by
         n = pos["close_fail"] = pos.get("close_fail", 0) + 1
         why = "無法確認交易所部位" if left is None else f"交易所上還有 {left:g}"
-        if nag(n):
+        now = _now()
+        if err is not None and B.reduce_only_rejected(err):
+            # 交易所明確拒絕（-2022）：同樣的單送幾次都一樣。連續 STUCK_AFTER_SEC 標成卡住、推一則要人工處理，之後拉長重試間隔（r99）
+            pos["reject_n"] = pos.get("reject_n", 0) + 1; pos.setdefault("reject_since", now); pos["reject_err"] = str(err)[:160]
+            if not pos.get("stuck_at") and pos["reject_n"] >= STUCK_MIN_REJECTS and now - pos["reject_since"] >= STUCK_AFTER_SEC * 1000:
+                pos["stuck_at"] = now
+                telegram.send(f"🆘 {sym} 引擎{pos.get('engine')} 交易所一直拒絕平倉（-2022，連續 {pos['reject_n']} 次、"
+                              f"{(now - pos['reject_since']) // 60000} 分鐘）——需要人工處理：到幣安確認這個部位。之後每 {STUCK_RETRY_SEC // 60} 分鐘才重試一次；"
+                              "確定平不掉時，網頁持倉卡片可以「停止追蹤此部位」（帳上移除、交易所不動）")
+        else:
+            # 暫時性錯誤（逾時、5xx、查不到部位）或別種拒絕：照舊每輪重試——正式網真的要緊急出場時，不能因為網路短暫中斷被拖慢
+            for k in ("reject_n", "reject_since", "reject_err", "stuck_at", "next_retry"): pos.pop(k, None)
+        if pos.get("stuck_at"): pos["next_retry"] = now + STUCK_RETRY_SEC * 1000
+        elif nag(n):
             telegram.send(f"🚨 {sym} 引擎{pos.get('engine')} {by}平倉未完成（第 {n} 次，{why}"
                           + (f"，{str(err)[:100]}" if err else "") + "）— 部位與停損都保留，每輪重試")
         raise CloseFailed(why)
 
     was = pos.pop("close_fail", 0); pos.pop("want_close", None)
+    for k in ("reject_n", "reject_since", "reject_err", "stuck_at", "next_retry"): pos.pop(k, None)
     # 交易所上已經平掉了——從這裡開始不能丟例外（清單第 8 條 r24）：算損益只用 .get()，缺欄位記為未知
     entry, q = num(pos.get("fill")), num(pos.get("qty"))   # 估算只用實際成交價；查不到就記未知，交給成交明細（r27）
     if pos.get("close_partial"): px = None                  # 平倉分好幾段成交過：最後一張單的均價只代表後半段，估算不能用它（r43）
@@ -430,9 +444,15 @@ def close_now(sym, pos, by):
     except Exception as e: _once_err(sym, "出場通知", e)
     return rec
 
+STUCK_AFTER_SEC = 600          # 交易所連續明確拒絕平倉（-2022）這麼久，標成卡住（清單第 16 條 r99）
+STUCK_MIN_REJECTS = 5          # 而且至少被拒這麼多次（只有一兩次就過了 10 分鐘的，不算）
+STUCK_RETRY_SEC = 600          # 卡住之後多久才重試一次
+
 def retry_close(sym, pos):
-    """上次平倉沒完成 → 每輪重試，直到交易所上確實沒有這個部位。"""
+    """上次平倉沒完成 → 每輪重試，直到交易所上確實沒有這個部位。
+    卡住（交易所一直明確拒絕）之後退讓：每 STUCK_RETRY_SEC 才重試一次（r99）。"""
     if not pos.get("want_close"): return "nothing"          # 沒有待平倉（回傳原因，清單第 2 條 r27）
+    if pos.get("stuck_at") and _now() < (num(pos.get("next_retry")) or 0): return "stuck"   # 退讓期間不送單
     try: close_now(sym, pos, pos["want_close"]); return "closed"
     except CloseFailed: return "pending"
 
@@ -673,6 +693,25 @@ def _step_ok(sym, stage):
     if n >= 1: telegram.send(f"✅ {sym} {stage}已恢復（先前連續出錯 {n} 次）")
 
 @engine_locked
+def abandon(sym):
+    """停止追蹤此部位（清單第 16 條 r99）：只有被交易所一直拒絕平倉、標成卡住的才可以。
+    帳上移除、記一筆排除的損益未知（不計入績效）；**交易所上的部位與掛單都不動**（撤單也平不掉的情況下，停損留著多一層保護）；
+    這檔記進「已放棄追蹤」（存進狀態檔）：交易所那一側清空前不再進場，對帳看到清空了自動解除並通知。"""
+    own = dict(store.get().get("open", {})); pos = own.get(sym)
+    if not pos: return dict(error=f"{sym} 不在本策略持倉裡")
+    if not pos.get("stuck_at"):
+        return dict(error=f"{sym} 還沒標成卡住——只有被交易所一直拒絕平倉（-2022 連續 {STUCK_AFTER_SEC // 60} 分鐘）的部位才能停止追蹤")
+    rec = dict(pos, symbol=sym, closed=time.strftime("%m-%d %H:%M"), by="停止追蹤（交易所一直拒絕平倉）",
+               exit=None, pnl=None, r=None, excluded=True)
+    own.pop(sym)
+    ab = dict(store.get().get("abandoned") or {})
+    ab[sym] = dict(side=pos.get("side"), engine=pos.get("engine"), qty=pos.get("qty"), at=time.strftime("%m-%d %H:%M"))
+    store.update(open=own, closed=(store.get().get("closed") or []) + [rec], abandoned=ab)
+    telegram.send(f"🗑 {sym} 引擎{pos.get('engine')} 停止追蹤：帳上移除、記一筆排除的損益未知（不計入績效）；"
+                  "交易所上的部位與掛單都沒動（停損還在的話多一層保護）；交易所那一側清空前這檔不再進場，清空後自動解除")
+    return dict(ok=True, msg=f"{sym} 已停止追蹤：帳上移除，交易所上的部位與掛單沒動；那一側清空前這檔不再進場")
+
+@engine_locked
 def run():
     """每輪迴圈呼叫一次（在 reconcile 之後，已被交易所停損掉的倉不會進來）。"""
     try: sweep_leftovers(); _step_ok("*", "重撤殘留單")
@@ -684,11 +723,11 @@ def run():
         res = None
         try:
             res = retry_close(sym, pos)                  # 上次平倉沒完成 → 先重試
-            if res == "pending": res = None
+            if res in ("pending", "stuck"): res = None
             elif res != "closed": res = retry_stop(sym, pos)
             _step_ok(sym, "重試平倉／移損")
         except Exception as e: _step_err(sym, "重試平倉／移損", e)
-        if res != "closed":
+        if res != "closed" and not pos.get("stuck_at"):          # 卡住（交易所一直拒絕）期間不重掛停損：一樣會被拒、而且補掛遇 -2021 又去平倉（r99）
             try:
                 if ensure_stop(sym, pos) == "closed": res = "closed"   # 等平倉期間停損也要一直在；補掛遇 -2021 直接出場
                 _step_ok(sym, "停損守衛")

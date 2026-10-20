@@ -124,6 +124,7 @@ def check(tag, name, cond, detail="", infra=False):
     if os.environ.get("PDH_AUDIT") and fx_now is not None:        # 第 22 種稽核：這個情境查成交明細時，部位是不是被直接改過
         q = fx_now.trade_queries
         hits = f"〔查成交{len(q)}次、未留成交{sum(x['untraced'] for x in q)}次〕" + hits
+    detail = str(detail).replace("\n", " ⏎ ") if detail else detail       # 細節有換行（多行推播）時命中標記會掉到別行，突變檢查器解析不到（r99：test_r97 那一項）
     print(f"  {'✅' if cond else '❌'} [{tag}] {name}" + (f"　{detail}" if detail else "") + hits)
     if not cond: fails.append(tag)
 
