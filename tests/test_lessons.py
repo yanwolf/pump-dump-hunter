@@ -55,7 +55,7 @@ B._mode.update(hedge=False, t=9e18)
 exchange(account_hedge=True, detect_ok=False, sent=sent,
          on_reject=lambda: B._mode.update(hedge=True, t=9e18))    # 被拒的同時，別的執行緒把快取改成雙向
 r = try_order(lambda: B.market_order("XUSDT", "SELL", 100, reduce_only=True))
-check("C1/C4", "送單後快取被改 → 依被拒單參數反轉，重送成功", r is True and "positionSide" in sent[-1], f"結果={r} 送了{len(sent)}次")
+check("C1/C4", "送單後快取被改 → 依被拒單參數反轉，重送成功", r is True and sent and "positionSide" in sent[-1], f"結果={r} 送了{len(sent)}次")
 
 # C3：快取從沒偵測成功過（空值）、偵測又失敗 → 單仍要送出
 sent = []

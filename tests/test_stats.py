@@ -41,12 +41,13 @@ check("S2", "G 多單：訊號 1.0、成交 1.002（買貴了）→ 進場滑價
 print("出場原因、依幣種、參數版本")
 check("S3", "出場原因：停損單 3、時間 1、手動 1", a["reasons"] == {"停損單": 3, "時間": 1, "手動": 1}, f"{a['reasons']}")
 sy = {x["symbol"]: x for x in rep["symbols"]}
-check("S3", "依幣種：BUSDT 兩筆（C、G）累計 −1.5R，排在最前面（虧最多）", rep["symbols"][0]["symbol"] == "BUSDT" and sy["BUSDT"]["total_r"] == -1.5
-      and sy["BUSDT"]["engines"] == "CG", f"{rep['symbols'][0]}")
+check("S3", "依幣種：BUSDT 兩筆（C、G）累計 −1.5R，排在最前面（虧最多）", rep["symbols"] and rep["symbols"][0]["symbol"] == "BUSDT" and sy["BUSDT"]["total_r"] == -1.5
+      and sy["BUSDT"]["engines"] == "CG", f"{rep['symbols'][:1]}")
 vers = {(v["version"], v["engine"]): v for v in rep["versions"]}
 check("S3", "參數版本：沒記錄的歸「舊版（未記錄）」、同一版本依引擎分開", ("舊版（未記錄）", "C") in vers and ("自訂 abc123", "C") in vers
       and vers[("自訂 abc123", "C")]["total"] == 2 and vers[("自訂 abc123", "C")]["unknown"] == 1, f"{list(vers)}")
 u = stats.compute([T("F", "X", None, None)])
+check("S3", "（前提）那一筆真的算進去了：1 筆、損益未知 1", u["total"] == 1 and u["unknown"] == 1, f"{u['total']} {u['unknown']}")
 check("S3", "沒有已知損益時期望值、損益 U、累計都是 —（None），不是 0", u["expectancy_r"] is None and u["pnl"] is None and u["total_r"] is None, f"{u}")
 far = stats.compute([T("C", "Y", -3.0, -0.3, side="SHORT", by="停損單", stop=1.1, exit=1.25)])
 check("S2", "「停損單」但成交價離停損價超過 2%（像是在 App 手動平倉）→ 不算停損滑價、另外計數", far["slip_stop_n"] == 0 and far["slip_stop_far"] == 1,
@@ -64,9 +65,11 @@ check("S4", "沒有實盤覆蓋 → 記成「預設參數」", o.get("ver_label"
 fx = fresh(); presets.set_live({"SCAN.watch_chg24": 15}); presets.apply_live()
 main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=300_000))
 o1 = (store.get().get("open", {}).get("XUSDT") or {}).get("ver")
+check("S4", "（前提）第一次開倉成交、記下了版本", bool(o1), f"{o1}")
 fx = fresh(); presets.set_live({"SCAN.watch_chg24": 15}); presets.apply_live()
 main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=300_000))
 o2 = (store.get().get("open", {}).get("XUSDT") or {}).get("ver")
+check("S4", "（前提）第二次開倉成交、記下了版本", bool(o2), f"{o2}")
 fx = fresh(); presets.set_live({"SCAN.watch_chg24": 20}); presets.apply_live()
 main.place("XUSDT", "C", Sig(), dict(SZ), dict(time="t", bar_t=300_000))
 o3 = (store.get().get("open", {}).get("XUSDT") or {}).get("ver")

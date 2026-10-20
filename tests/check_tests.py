@@ -175,7 +175,8 @@ def main():
     missing = [k for k in need if not any(k in c for c in canary)] + missing_all
     print(f"金絲雀（已知有問題的人造測試）：報出 {len(canary)} 個問題" + ("，四種都抓到" if not missing else f"，漏掉 {missing}"))
     if missing: problems += 1
-    files = sorted(glob.glob("tests/test_r*.py"))
+    from tests import registry                       # 測試檔清單從登記表拿（r101：以前 test_r*.py 樣式漏掉 test_stats、test_maxqty）
+    files = ["tests/" + f for f in registry.files("negative")]
     tot_s = tot_c = 0
     for path in files:
         out, ns, nc = check_source(open(path, encoding="utf-8").read(), resets)

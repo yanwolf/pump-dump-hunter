@@ -74,7 +74,8 @@ def self_test():
 
 def main():
     if "--self-test" in sys.argv: sys.exit(1 if self_test() else 0)
-    total, files = 0, sorted(glob.glob("tests/test_r*.py"))
+    from tests import registry                       # 測試檔清單從登記表拿（r101）
+    total, files = 0, ["tests/" + f for f in registry.files("indexing")]
     for p in files:
         probs = check_source(open(p, encoding="utf-8").read())
         print(f"== {p}：{len(probs)} 處")

@@ -280,7 +280,8 @@ def self_test():
 def main():
     if "--self-test" in sys.argv: sys.exit(1 if self_test() else 0)
     legacy = legacy_names()
-    files = sorted(glob.glob("tests/test_r*.py")); total = 0
+    from tests import registry                       # 測試檔清單從登記表拿（r101）
+    files = ["tests/" + f for f in registry.files("repeat")]; total = 0
     for p in files:
         src = open(p, encoding="utf-8").read()
         probs = crash_guards(src) + new_interface(src, legacy) + reset_then_use(src)

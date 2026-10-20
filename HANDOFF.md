@@ -44,6 +44,7 @@ tests/test_r77.py     清單 r76→r77：進場補登記號（部位平掉後、
 tests/test_r86.py     清單 r84→r86：重啟前後（真的存檔、重新載入）冷卻、待平倉、部位上執行時長出來的鍵都在；讀寫兩邊沒有過濾（python -m tests.test_r86）
 tests/test_r97.py     清單 r88→r98（第 6 條）：K 線 IP 權重——批次讓路／429 照 Retry-After／418 立刻停、實盤不排隊、事件掃描被限流整個中止不快取（python -m tests.test_r97）
 tests/test_r99.py     清單第 16 條：交易所一直拒絕平倉（-2022）的退讓與「停止追蹤」；模擬交易所 close_reject=reject／error（python -m tests.test_r99）
+tests/registry.py     測試檔登記表：tests/test_*.py 全部自動列入，逐檔檢查都從這裡拿清單；不參加的寫理由（r101）
 tests/test_maxqty.py  交易所市價單數量上限（-4005，2026-09-22 SKRUSDT 實單）：開倉壓到上限、平倉分批
 tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版：r78、r88）；python -m tests.rerun_old legacy:rNN
 tests/check_indexing.py 先索引沒先確認的靜態檢查；--self-test 自我驗證

@@ -10,7 +10,8 @@ from tests.mutation_check import crash_of
 
 def main():
     if len(sys.argv) < 2: sys.exit(__doc__)
-    old = sys.argv[1]; names = sys.argv[2:] or sorted(os.path.basename(p)[:-3] for p in glob.glob("tests/test_r*.py"))
+    from tests import registry                       # 測試檔清單從登記表拿（r101：以前 test_r*.py 樣式漏掉 test_stats、test_maxqty）
+    old = sys.argv[1]; names = sys.argv[2:] or [f[:-3] for f in registry.files("rerun")]
     work = tempfile.mkdtemp()
     if old.startswith("legacy:"):
         # 專案裡存的舊版（tests/legacy/rNN，只有 app/）：拿現在的專案當底，把 app/ 換成舊版的

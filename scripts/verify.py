@@ -37,6 +37,8 @@ for t in tests:
 
 # 3. 檢查器與它們的自我驗證
 for name, args in [("測試框架自我驗證", ["-m", "tests.harness_selftest"]),
+                   ("測試檔登記表：自我驗證", ["-m", "tests.registry", "--self-test"]),
+                   ("測試檔登記表：逐檔檢查都從這裡拿清單、不參加的寫明理由（r101）", ["-m", "tests.registry"]),
                    ("測試靜態檢查（含金絲雀）", ["-m", "tests.check_tests"]),
                    ("犯到第三次的測試錯誤（崩掉守護、新介面守護）：自我驗證", ["-m", "tests.check_repeat", "--self-test"]),
                    ("犯到第三次的測試錯誤（崩掉守護、新介面守護）", ["-m", "tests.check_repeat"]),
