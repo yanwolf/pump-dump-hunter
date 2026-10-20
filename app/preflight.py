@@ -11,7 +11,7 @@
 import time
 from . import binance as B, config as C, telegram, store
 
-VERSION = "2026-10-20r99"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
+VERSION = "2026-10-20r100"      # 對應 BINANCE_LESSONS.md 版本；複製過去時連同這行一起帶
 
 
 def check(trade=False):

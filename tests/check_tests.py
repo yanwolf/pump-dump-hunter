@@ -23,13 +23,23 @@ def reset_names():
             return {f"{ast.get_source_segment(src, e.elts[0])}.{e.elts[1].value}" for e in n.value.elts}
     return set()
 
+_MOD_CONSTS = {}                                 # 檔案最上層寫死的非空清單名稱（check_source 掃檔前填好）
+
+def _never_empty(node):
+    """迭代來源一定非空：寫死的非空 list／tuple／set、非空字串、檔案最上層寫死的非空清單名稱（r100）。"""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)): return bool(node.elts)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str): return bool(node.value)
+    if isinstance(node, ast.Name): return node.id in _MOD_CONSTS
+    return False
+
 def negative(expr):
     if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not): return True
     # all(...) 對空清單是 True：程式什麼都沒做（清單是空的）也成立，跟否定句一樣（r44）
     if isinstance(expr, ast.Call) and getattr(expr.func, "id", "") == "all":
-        # 迭代的是寫死、不會空的字面清單／元組（例如 all(k in page for k in ("a", "b"))）：不會因為「沒東西」而成立，是正向斷言（r99）
+        # all(...) 在迭代來源空的時候成立（第 25 種，r44）。來源**一定非空、而且沒有 if 篩選**才是正向斷言（r99、r100）：
+        # 寫死的非空 list／tuple／set、非空字串、檔案最上層寫死的非空清單名稱。帶篩選的照報（篩完可能空）、寫死但空的照報、執行時才算出來的照報
         g = expr.args[0] if expr.args else None
-        if isinstance(g, (ast.GeneratorExp, ast.ListComp)) and all(isinstance(c.iter, (ast.List, ast.Tuple)) and c.iter.elts for c in g.generators):
+        if isinstance(g, (ast.GeneratorExp, ast.ListComp, ast.SetComp)) and all(not c.ifs and _never_empty(c.iter) for c in g.generators):
             return False
         return True
     if isinstance(expr, ast.Compare):
@@ -58,6 +68,15 @@ def only_fx(expr):
     return names <= {"fx", "len", "any", "all", "abs", "float", "int", "p", "o", "c", "x"} and "fx" in names
 
 def check_source(src, resets):
+    tree0 = ast.parse(src)
+    _MOD_CONSTS.clear()
+    for n in tree0.body:                         # 檔案最上層寫死的非空清單：FIELDS = ("a", "b")（只認寫一次、不會被改的）
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and _never_empty(n.value):
+            _MOD_CONSTS[n.targets[0].id] = True
+    for n in ast.walk(tree0):                    # 之後被重新指定或就地修改的不算寫死
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id in _MOD_CONSTS and \
+                sum(1 for m in tree0.body if isinstance(m, ast.Assign) and any(isinstance(t, ast.Name) and t.id == n.id for t in m.targets)) > 1:
+            _MOD_CONSTS.pop(n.id, None)
     tree = ast.parse(src); out = []
     if "from tests.harness import (" not in src:
         out.append("沒有用共用框架，或用了 import *（pyflakes 會因此查不到未定義名稱，第 19 種）")
@@ -96,12 +115,23 @@ def check_source(src, resets):
     return out, len(scen), checks
 
 CANARY = '''from tests.harness import (check, fresh, manager)
+CANARY_FIELDS = ("a", "b")
 fx = fresh()
 manager.foo = 1
 check("Z", "只有否定句", not fx.calls)
 check("Z", "all() 對空清單成立", all(c for c in fx.calls))
 fx = fresh()
 check("Z", "all() 迭代寫死的非空元組：是正向斷言，不該被當成否定句", all(k in "abc" for k in ("a", "b")))
+fx = fresh()
+check("Z", "all() 迭代寫死的非空 set：不該被當成否定句", all(k in "abc" for k in {"a", "b"}))
+fx = fresh()
+check("Z", "all() 迭代非空字串：不該被當成否定句", all(c in "abc" for c in "ab"))
+fx = fresh()
+check("Z", "all() 迭代檔案最上層寫死的清單名稱：不該被當成否定句", all(k in "abc" for k in CANARY_FIELDS))
+fx = fresh()
+check("Z", "all() 帶 if 篩選：篩完可能空，仍是否定句", all(k in "abc" for k in ("a", "b") if k in fx.calls))
+fx = fresh()
+check("Z", "all() 寫死但是空的：仍是否定句", all(k in "abc" for k in ()))
 fx = fresh()
 why = "x"
 check("Z", f"（前提）{why}：f-string 的前提也要認得", len(fx.calls) >= 0)
@@ -137,7 +167,10 @@ def main():
     need = ["RESET_ATTRS 沒有它", "否定句斷言沒有前提", "沒有任何正向斷言", "結尾沒有呼叫 finish()"]
     if sum("否定句斷言沒有前提" in c for c in canary) < 2: missing_all = ["all() 沒被當成否定句"]
     elif any("f-string 前提之後的否定句" in c for c in canary): missing_all = ["f-string 描述的前提沒認出來"]
-    elif any("迭代寫死的非空元組" in c for c in canary): missing_all = ["all() 迭代寫死的非空元組被誤判成否定句"]
+    elif any(k in c for c in canary for k in ("迭代寫死的非空元組", "迭代寫死的非空 set", "迭代非空字串", "迭代檔案最上層寫死的清單名稱")):
+        missing_all = ["all() 迭代一定非空的來源被誤判成否定句"]
+    elif not all(any(k in c for c in canary) for k in ("帶 if 篩選", "寫死但是空的")):
+        missing_all = ["all() 帶篩選或寫死但空的沒有被當成否定句（r100：這兩種仍然要報）"]
     else: missing_all = []
     missing = [k for k in need if not any(k in c for c in canary)] + missing_all
     print(f"金絲雀（已知有問題的人造測試）：報出 {len(canary)} 個問題" + ("，四種都抓到" if not missing else f"，漏掉 {missing}"))
