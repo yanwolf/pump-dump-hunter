@@ -87,6 +87,14 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
       <button class=go onclick="lbstart()">開始分析</button><button onclick="lbload()">更新</button></div>
     <div id=lbout class=meta>尚未執行</div>
   </div>
+  <div class=card><h2>母體偏差檢查（F／G，研究用，不動實盤）</h2>
+    <div class=meta>實盤對照：已平倉的 F／G 逐筆看「當天有沒有達到回測母體標準」「實盤名單會不會盯」「進場時 24h 區間」，幾分鐘。<br>
+      無偏差母體：不看當天結果，用引擎自己的必要條件（2h 高低差 ≥10% 且 25h 高低差 ≥15%）挑時段重跑 F、G，同樣三種分組，約一小時，跑完推播。
+      兩個都跟上面的掃描、籌碼分析互斥。</div>
+    <div class=row style=margin-top:8px><button class=go onclick="popstart('live')">實盤對照</button>
+      <button class=go onclick="popstart('trigger')">無偏差母體（90 天）</button><button onclick="popload()">更新</button></div>
+    <div id=popout class=meta>尚未執行</div>
+  </div>
   <div class=card><h2>OI 前瞻驗證（實盤 F／G，只記不過濾）</h2>
     <div class=meta>每筆 F／G 訊號記下開倉當下的 OI 標籤，平倉後依回測的三等分界線分組。界線在第一次打開這裡時從籌碼標籤分析凍結，之後重跑分析也不會改。
       要驗證的假設：F 的 OI 在掉（1h 變化、距 24h 高點的低組）較好；G 的 OI 1h 中間組較好。每組至少累積 30 筆再下結論。</div>
@@ -253,6 +261,20 @@ async function lbload(){const o=$('lbout');const r=await (await F('/api/labels')
  o.innerHTML=h;
  if(!r.status.startsWith('完成')&&!r.status.startsWith('失敗')&&!r.status.startsWith('中止'))setTimeout(lbload,5000)}
 
+async function popstart(job){const r=await (await F('/api/population/start?job='+job+'&d=90')).json();
+ if(!r.started){alert(r.error||'沒有啟動');return}setTimeout(popload,1500)}
+async function popload(){const o=$('popout');const r=await (await F('/api/population')).json();
+ if(!r.status){o.innerHTML='尚未執行';return}
+ const fx=(v,d=2)=>v===null||v===undefined?'—':(typeof v==='number'?v.toFixed(d):v);
+ const cr=v=>v===null||v===undefined?'—':`<span class=${v>0?'pos':v<0?'neg':''}>${v>0?'+':''}${v.toFixed(2)}</span>`;
+ const tbl=(rows)=>'<div class=scroll><table><tr><th>分組<th>組<th>筆<th>勝率<th>PF<th>平均R<th>總R</tr>'+rows.map(x=>
+   `<tr><td>${x.tag}<td class=lbl>${x.group}<td>${x.n}<td>${x.win!=null?x.win+'%':'—'}<td>${fx(x.pf)}<td>${cr(x.avg)}<td>${fx(x.tot,1)}</tr>`).join('')+'</table></div>';
+ let h=`<b>${r.status}</b>`;
+ for(const e of ['G','F']){
+  if(r.live&&r.live.report)h+=`<h2 style=margin-top:12px>引擎 ${e} · 實盤（${r.live.time}）</h2>`+tbl(r.live.report[e]);
+  if(r.trigger&&r.trigger.report)h+=`<h2 style=margin-top:12px>引擎 ${e} · 無偏差母體 ${r.trigger.days} 天（${r.trigger.time}，${r.trigger.symbols} 檔 ${r.trigger.segments} 段）</h2>`+tbl(r.trigger.report[e])}
+ o.innerHTML=h;
+ if(!/^(完成|失敗|中止)/.test(r.status))setTimeout(popload,5000)}
 async function fwload(){const o=$('fwout');const r=await (await F('/api/forward')).json();
  if(r.error){o.innerHTML=r.error;return}
  o.innerHTML=`界線凍結於 ${r.frozen_at||'—'} · 已平倉 F／G 共 ${r.n} 筆`+T(r.rows.map(x=>({...x,win:x.win!=null?x.win+'%':'',total:x.tot})),['engine','label','cut','group','n','win','pf','avg','total','hypo'])}
@@ -293,4 +315,4 @@ async function pf(){const o=$('pfout');o.innerHTML='檢查中…';
  if(r.error){o.innerHTML='<span style=color:var(--down)>'+r.error+'</span>';return}
  o.innerHTML=r.results.map(x=>`${x.status=='ok'?'✅':x.status=='warn'?'⚠️':'❌'} ${x.item}　<span class=meta>${x.msg||''}</span>`).join('<br>')+(r.cached?`<br><span class=meta>（${r.age} 秒前的結果；自檢會打高權重查詢，60 秒內不重跑）</span>`:'')}
 async function sigclear(){if(!confirm('清除「訊號」和「已平倉」紀錄？（已下單紀錄保留）'))return;await F('/api/signals/clear');load()}
-load();swload().catch(()=>{});lbload().catch(()=>{});fwload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>
+load();swload().catch(()=>{});lbload().catch(()=>{});fwload().catch(()=>{});popload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>

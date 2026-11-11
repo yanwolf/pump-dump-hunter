@@ -19,6 +19,7 @@ _OLD_STYLE = "最早期的舊式測試：用自己的簡化模擬 binance 模組
 _NEW_MODULE = "測的是新模組 app/labels.py（研究用的籌碼標籤分析），存的舊版程式沒有這個模組，匯入就失敗；不是舊行為的回歸測試"
 SKIP = {
     "test_labels.py": {"rerun": _NEW_MODULE},
+    "test_population.py": {"rerun": "測的是新模組 app/population.py（研究用的母體偏差檢查），存的舊版程式沒有這個模組，匯入就失敗；不是舊行為的回歸測試"},
     "test_lessons.py": {"negative": _OLD_STYLE, "repeat": _OLD_STYLE, "mutation": _OLD_STYLE + "；也不經過模擬交易所，突變碰不到它"},
     "test_parity.py": {"negative": _OLD_STYLE, "repeat": _OLD_STYLE, "mutation": _OLD_STYLE + "；也不經過模擬交易所，突變碰不到它"},
 }

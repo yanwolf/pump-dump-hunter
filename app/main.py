@@ -5,7 +5,7 @@ time.tzset()
 import base64, hashlib, hmac, json, threading, traceback, uuid
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from . import backtest, binance as B, config as C, labels, manager, params, presets, preflight, risk, scanner, stats, store, sweep, telegram
+from . import backtest, binance as B, config as C, labels, manager, population, params, presets, preflight, risk, scanner, stats, store, sweep, telegram
 from .signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
@@ -551,7 +551,7 @@ def norm_symbol(s):
 PAGE = (Path(__file__).parent / "static" / "dashboard.html").read_text(encoding="utf-8")
 
 
-WRITE = ("/api/pos", "/api/signals/clear", "/api/sweep/start", "/api/sweep/clear", "/api/labels/start")
+WRITE = ("/api/pos", "/api/signals/clear", "/api/sweep/start", "/api/sweep/clear", "/api/labels/start", "/api/population/start")
 _fail = dict(n=0, t=0)
 
 class H(BaseHTTPRequestHandler):
@@ -662,6 +662,16 @@ class H(BaseHTTPRequestHandler):
             except ValueError: d = 90
             ok = labels.start(d)
             body, ct = json.dumps(dict(started=ok, error=None if ok else "已有籌碼分析或歷史事件掃描在跑，等它跑完"), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/population/start"):
+            import urllib.parse
+            q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
+            job = q.get("job", ["live"])[0]
+            try: d = max(7, min(int(q.get("d", ["90"])[0]), 90))
+            except ValueError: d = 90
+            ok = population.start(job, d, store.get().get("closed", []))
+            body, ct = json.dumps(dict(started=ok, error=None if ok else "已有母體檢查、籌碼分析或歷史事件掃描在跑，等它跑完"), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/population"):
+            body, ct = json.dumps(population.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/forward"):
             try: res = labels.forward(store.get().get("closed", []), labels.frozen_cuts())
             except Exception as e: res = dict(error=str(e))

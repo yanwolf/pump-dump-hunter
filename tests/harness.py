@@ -30,7 +30,8 @@ manager.telegram.send = telegram.send; main.telegram.send = telegram.send
 RESET_ATTRS = [(B, "klines"), (B, "_get"), (manager, "_now"), (manager, "retry_stop"), (manager, "record_close"),
                (manager, "close_now"), (main.scanner, "scan"), (main, "reconcile"), (main, "tick"), (store, "push"),
                (json, "dump"), (manager, "_start_backfill"), (B, "LOG"), (B, "user_trades"),
-               (B, "_clock"), (B, "_sleep"), (B, "perp_symbols"), (B, "ticker_24h")]   # r97：虛擬時鐘、事件掃描的幣清單                   # 全域的 json 模組：換掉它會影響所有模組，更要還原
+               (B, "_clock"), (B, "_sleep"), (B, "perp_symbols"), (B, "ticker_24h"),
+               (B, "klines_range")]   # r97：虛擬時鐘、事件掃描的幣清單                   # 全域的 json 模組：換掉它會影響所有模組，更要還原
 RESET_ATTRS = [(m, a) for m, a in RESET_ATTRS if hasattr(m, a)]   # 在舊版程式上重跑測試時（清單用法第 5 點 r32），略過不存在的
 ORIG = {(id(m), a): getattr(m, a) for m, a in RESET_ATTRS}
 

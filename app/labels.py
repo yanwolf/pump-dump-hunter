@@ -43,8 +43,8 @@ def running():
 def start(days=90):
     """跟歷史事件掃描互斥：兩個子程序各自只看自己用掉的 K 線權重，同時跑會一起打滿，擠到實盤。"""
     global _proc
-    from . import sweep
-    if running() or sweep.running(): return False
+    from . import population, sweep
+    if running() or sweep.running() or population.running(): return False
     env = dict(os.environ, LABEL_DAYS=str(int(days)))
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _proc = subprocess.Popen([sys.executable, "-m", "app.labels"], env=env, cwd=root)
