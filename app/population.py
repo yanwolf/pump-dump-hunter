@@ -30,6 +30,10 @@ SPECS = dict(
     c5=dict(engines=("C",), iv="5m", bar=300000, r2h=0.15, r25h=0.0, pre=3 * HOUR, post=7 * HOUR),
 )
 ENGINES = ("C", "F", "G")
+M1_R25H = dict(F=0.40, G=0.15)          # 1m 家族的 25h 高低差門檻＝要跑的引擎裡最寬的那個（只跑 F 時用 F 自己的 40%，段數少很多）
+RECENT = 90 * DAY                       # 超過 90 天的回測：最近 90 天是已經看過的資料，之前的才是樣本外
+# 預先登記（2026-11-12，看樣本外結果之前定死，不再調）：F 進場時 24h 區間 >= 80% 才做。
+PREREG = dict(F=("gain24", 80.0))
 _proc = None
 
 # ---------- 主程序用 ----------
@@ -40,17 +44,18 @@ def state():
 def running():
     return _proc is not None and _proc.poll() is None
 
-def start(job, days=90, closed=None):
-    """job: live | trigger。跟歷史事件掃描、籌碼標籤分析互斥（同時抓 K 線會一起打滿權重）。"""
+def start(job, days=90, closed=None, engines=ENGINES):
+    """job: live | trigger。engines 只對 trigger 有用（例如只跑 C、F）。跟歷史事件掃描、籌碼標籤分析互斥。"""
     global _proc
     from . import labels, sweep
-    if job not in ("live", "trigger") or running() or sweep.running() or labels.running(): return False
+    engines = tuple(e for e in ENGINES if e in (engines or ()))
+    if job not in ("live", "trigger") or not engines or running() or sweep.running() or labels.running(): return False
     if job == "live":
         rows = [dict(symbol=t.get("symbol"), engine=t.get("engine"), r=t.get("r"), bar_t=t.get("bar_t") or t.get("ts"),
                      closed=t.get("closed")) for t in (closed or [])
                 if t.get("engine") in ENGINES and not t.get("excluded")]
         json.dump(rows, open(INPUT, "w"), ensure_ascii=False)
-    env = dict(os.environ, POP_JOB=job, POP_DAYS=str(int(days)))
+    env = dict(os.environ, POP_JOB=job, POP_DAYS=str(int(days)), POP_ENGINES=",".join(engines))
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _proc = subprocess.Popen([sys.executable, "-m", "app.population"], env=env, cwd=root)
     return True
@@ -105,7 +110,7 @@ def _stats(rs):
     return dict(n=len(rs), win=round(len(w) / len(rs) * 100), avg=round(sum(rs) / len(rs), 2), tot=round(sum(rs), 1),
                 pf=round(sum(w) / abs(sum(l)), 2) if l and sum(l) else None)
 
-def report(trades, split_ts=None):
+def report(trades, split_ts=None, engines=ENGINES):
     """trades: [{engine, r, bar_t, pop, watch, band}] → {engine: [{tag, group, n, win, pf, avg, tot, first, second}]}，第一列是全部。
     split_ts 有給就附前段／後段平均 R（看了表才挑出來的分組，至少要兩段同向才值得追）。"""
     out = {}
@@ -115,10 +120,15 @@ def report(trades, split_ts=None):
             a = [t["r"] for t in ts if (t.get("bar_t") or 0) < split_ts]; b = [t["r"] for t in ts if (t.get("bar_t") or 0) >= split_ts]
             d.update(first=_stats(a).get("avg"), first_n=len(a), second=_stats(b).get("avg"), second_n=len(b))
         return d
-    for eid in ENGINES:
+    for eid in engines:
         ts = [t for t in trades if t.get("engine") == eid and isinstance(t.get("r"), (int, float))]
         if not ts: continue
         rows = [row("全部", "", ts)]
+        if eid in PREREG:                                    # 預先登記的門檻放第二列
+            key, th = PREREG[eid]
+            hit = [t for t in ts if isinstance(t.get(key), (int, float)) and t[key] >= th]
+            rest = [t for t in ts if not (isinstance(t.get(key), (int, float)) and t[key] >= th)]
+            rows += [row("預先登記", f"≥{th:g}%", hit), row("預先登記", f"<{th:g}%／缺", rest)]
         for tag, name in (("pop", "母體"), ("watch", "名單"), ("band", "24h區間")):
             groups = {}
             for t in ts: groups.setdefault(t.get(tag) or "缺", []).append(t)
@@ -175,7 +185,21 @@ def run_live(B, kdir):
         out.append(dict(t, **entry_tags(t["engine"], k, idx[last], hi, lo, pc)))
     return out, skipped
 
-def run_trigger(B, kdir, days):
+def prereg_verdict(trades, split_ts):
+    """預先登記的判讀只看樣本外（split_ts 之前）：門檻內平均 R > 0 而且比門檻外好，才算成立。"""
+    out = {}
+    for eid, (key, th) in PREREG.items():
+        oos = [t for t in trades if t.get("engine") == eid and isinstance(t.get("r"), (int, float)) and (t.get("bar_t") or 0) < split_ts]
+        if not oos: continue
+        a = [t["r"] for t in oos if isinstance(t.get(key), (int, float)) and t[key] >= th]
+        b = [t["r"] for t in oos if not (isinstance(t.get(key), (int, float)) and t[key] >= th)]
+        sa, sb = _stats(a), _stats(b)
+        ok = sa["n"] >= 30 and sa["avg"] > 0 and (not sb["n"] or sa["avg"] > sb["avg"])
+        why = ("樣本外成立" if ok else "樣本外不成立") if sa["n"] >= 30 else f"樣本外門檻內只有 {sa['n']} 筆，不到 30 筆不判"
+        out[eid] = dict(rule=f"{key} ≥ {th:g}%", hit=sa, rest=sb, verdict=why)
+    return out
+
+def run_trigger(B, kdir, days, engines=ENGINES):
     from . import backtest
     end = int(time.time() * 1000) // HOUR * HOUR; start = end - days * DAY
     syms = B.perp_symbols(); tick = B.ticker_24h()
@@ -183,9 +207,12 @@ def run_trigger(B, kdir, days):
     out, nseg = [], 0
     cnt = lambda e: sum(1 for x in out if x["engine"] == e)
     for n, s in enumerate(syms):
-        _write(status=f"無偏差母體：{n}/{len(syms)} 檔，{nseg} 段，C {cnt('C')}、F {cnt('F')}、G {cnt('G')} 筆")
-        h1 = B.klines_range(s, "1h", start - DAY, end - 1)        # 每次的區間都不同，不快取（一檔兩個請求）
-        for fam, sp in SPECS.items():
+        _write(status=f"無偏差母體 {days} 天：{n}/{len(syms)} 檔，{nseg} 段，" + "、".join(f"{e} {cnt(e)}" for e in engines) + " 筆")
+        h1 = B.klines_range(s, "1h", start - DAY, end - 1)        # 每次的區間都不同，不快取
+        for fam, sp0 in SPECS.items():
+            sp = dict(sp0, engines=tuple(e for e in sp0["engines"] if e in engines))
+            if not sp["engines"]: continue
+            if fam == "m1": sp["r25h"] = min(M1_R25H[e] for e in sp["engines"])
             per_day = DAY // sp["bar"]
             for a, b, keep in trigger_segments(h1, **sp):
                 if keep >= end or b <= start: continue
@@ -234,15 +261,21 @@ def main():
             res = dict(time=time.strftime("%m-%d %H:%M"), n=len(tr), skipped=skipped, report=report(tr))
             msg = f"完成（實盤對照）：{len(tr)} 筆" + (f"，{skipped} 筆缺進場時間或 K 線，沒算" if skipped else "")
         else:
-            tr, nseg, nsym, start = run_trigger(B, sweep.KDIR, days)
+            engines = tuple(e for e in os.environ.get("POP_ENGINES", ",".join(ENGINES)).split(",") if e in ENGINES)
+            tr, nseg, nsym, start = run_trigger(B, sweep.KDIR, days, engines)
             miss, notyet = add_oi(tr, sweep.KDIR)
-            split = start + days * DAY // 2
-            rep_ = report(tr, split)
-            res = dict(time=time.strftime("%m-%d %H:%M"), days=days, n=len(tr), segments=nseg, symbols=nsym, report=rep_,
-                       oi=oi_report(tr, split), oi_missing=miss, oi_notyet=notyet,
-                       split=time.strftime("%m-%d", time.localtime(split / 1000)))
+            end = start + days * DAY
+            oos = days * DAY > RECENT
+            split = end - RECENT if oos else start + days * DAY // 2      # 長期：之前＝樣本外、最近 90 天＝看過的
+            rep_ = report(tr, split, engines)
+            pre = prereg_verdict(tr, split) if oos else {}
+            res = dict(time=time.strftime("%m-%d %H:%M"), days=days, engines=list(engines), n=len(tr), segments=nseg, symbols=nsym,
+                       report=rep_, oi=oi_report(tr, split), oi_missing=miss, oi_notyet=notyet, prereg=pre,
+                       split=time.strftime("%m-%d", time.localtime(split / 1000)),
+                       halves=[f"之前 {days - 90} 天（樣本外）", "最近 90 天"] if oos else ["前段", "後段"])
             msg = f"完成（無偏差母體 {days} 天）：{nsym} 檔 {nseg} 段；" + "；".join(
-                f"{e} {rep_[e][0]['n']} 筆 PF {rep_[e][0].get('pf')} 平均 {rep_[e][0].get('avg')}R" for e in ENGINES if e in rep_)
+                f"{e} {rep_[e][0]['n']} 筆 PF {rep_[e][0].get('pf')} 平均 {rep_[e][0].get('avg')}R" for e in engines if e in rep_) + "".join(
+                f"；預先登記 {e} {v['rule']}：{v['verdict']}" for e, v in pre.items())
         _write(**{key: res}); _end(msg)
     except B.RateLimited as e:
         _end(f"中止：被幣安限流（{str(e)[:100]}）。已抓的 K 線有快取，過幾分鐘重跑會接著抓")

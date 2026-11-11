@@ -173,6 +173,39 @@ check("P6", "交易貼上 OI 標籤（從 data.binance.vision 的 metrics 檔）
 check("P6", "結束各推播一次", len([m for m in TG if m.startswith("🔬 母體偏差檢查完成")]) == 2, f"{TG}")
 for v in ("POP_JOB", "POP_DAYS"): os.environ.pop(v, None)
 
+print("一年樣本外：只跑 C、F；F 用自己的 25h 門檻 40%，交易跟全跑時一樣")
+fx = fresh()
+B.klines_range = fake_range
+B.perp_symbols = lambda: ["XUSDT"]
+B.ticker_24h = lambda: {"XUSDT": {"quoteVolume": "5000000"}}
+labels._http = fake_http
+all3, *_ = population.run_trigger(B, os.environ["DATA_DIR"], 10)
+only, *_ = population.run_trigger(B, os.environ["DATA_DIR"], 10, ("C", "F"))
+fa = sorted((x["bar_t"], x["r"]) for x in all3 if x["engine"] == "F")
+fo = sorted((x["bar_t"], x["r"]) for x in only if x["engine"] == "F")
+check("P9", "（前提）全跑時 F 有交易", len(fa) >= 1, f"{fa}")
+check("P9", "只跑 C、F：F 的交易一模一樣、沒有 G", fo == fa and not any(x["engine"] == "G" for x in only), f"{fo} vs {fa}")
+SPL = 1000
+tr9 = ([dict(engine="F", r=1.0, bar_t=10, gain24=90.0)] * 20 + [dict(engine="F", r=-0.5, bar_t=10, gain24=100.0)] * 10
+       + [dict(engine="F", r=-1.0, bar_t=10, gain24=50.0)] * 5 + [dict(engine="F", r=-1.0, bar_t=2000, gain24=120.0)] * 50)
+pv = population.prereg_verdict(tr9, SPL)
+check("P9", "（前提）樣本外（分界之前）門檻內 30 筆：(20−5)/30＝+0.5R；門檻外 5 筆 −1R", pv["F"]["hit"]["n"] == 30 and pv["F"]["hit"]["avg"] == 0.5 and pv["F"]["rest"]["avg"] == -1.0, f"{pv}")
+check("P9", "樣本外成立（最近那 50 筆 −1R 不影響判讀：那是看過的資料）", pv["F"]["verdict"] == "樣本外成立", f"{pv}")
+pv2 = population.prereg_verdict([dict(t, r=-t["r"]) for t in tr9[:35]], SPL)
+check("P9", "同樣筆數但門檻內是負的 → 樣本外不成立", pv2["F"]["verdict"] == "樣本外不成立", f"{pv2}")
+pv3 = population.prereg_verdict(tr9[:10] + tr9[30:], SPL)
+check("P9", "門檻內不到 30 筆 → 不判", "不到 30 筆" in pv3["F"]["verdict"], f"{pv3}")
+rr = {(x["tag"], x["group"]): x for x in population.report(tr9, SPL)["F"]}
+check("P9", "報表第二、三列是預先登記：≥80% 80 筆、<80%／缺 5 筆", rr[("預先登記", "≥80%")]["n"] == 80 and rr[("預先登記", "<80%／缺")]["n"] == 5, f"{list(rr)}")
+import subprocess as real_subprocess
+population.subprocess = FakeSub; population._proc = None; FakePopen.made.clear()
+ok = population.start("trigger", 365, None, ("F", "C", "X"))
+check("P9", "啟動帶天數與引擎（不認得的丟掉、照 C、F 順序）", ok and FakePopen.made and FakePopen.made[-1][1]["POP_DAYS"] == "365" and FakePopen.made[-1][1]["POP_ENGINES"] == "C,F",
+      f"{[m[1].get('POP_ENGINES') for m in FakePopen.made]}")
+population._proc = None
+check("P9", "一個認得的引擎都沒有 → 不啟動", population.start("trigger", 365, None, ("X",)) is False and len(FakePopen.made) == 1)
+population.subprocess = real_subprocess; population._proc = None
+
 print("實盤 F／G 只記訊號不下單")
 fx = fresh()
 assert hasattr(main, "_paper"); assert hasattr(main, "SIGNAL_ONLY")    # 舊版沒有只記模式：這段整個不能跑

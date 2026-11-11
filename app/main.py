@@ -682,9 +682,10 @@ class H(BaseHTTPRequestHandler):
             import urllib.parse
             q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
             job = q.get("job", ["live"])[0]
-            try: d = max(7, min(int(q.get("d", ["90"])[0]), 90))
+            try: d = max(7, min(int(q.get("d", ["90"])[0]), 365))
             except ValueError: d = 90
-            ok = population.start(job, d, store.get().get("closed", []))
+            eng = tuple(q.get("e", ["C,F,G"])[0].split(","))
+            ok = population.start(job, d, store.get().get("closed", []), eng)
             body, ct = json.dumps(dict(started=ok, error=None if ok else "已有母體檢查、籌碼分析或歷史事件掃描在跑，等它跑完"), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/population"):
             body, ct = json.dumps(population.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
