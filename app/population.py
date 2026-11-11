@@ -54,16 +54,16 @@ def entry_tags(eid, k, i, day_hi, day_lo, prev_close):
     if prev_close and prev_close > 0 and day_hi and day_lo:
         kind, th = POP[eid]
         hit = day_hi / prev_close - 1 >= th if kind == "rise" else 1 - day_lo / prev_close >= th
-        out["pop"] = ("在" if hit else "不在") + ("暴漲日" if kind == "rise" else "崩盤日") + "母體"
+        out["pop"] = "在" if hit else "不在"                  # 手機表格要窄：組名只寫「在／不在」，說明在網頁圖例
     w = k[max(0, i - 1439):i + 1]
     lo, hi = min(x["l"] for x in w), max(x["h"] for x in w)
     if lo > 0 and len(w) >= 1440:
         g = hi / lo - 1; out["gain24"] = round(g * 100, 1)
         a, b = BANDS[eid]
-        out["band"] = f"24h 區間 < {a:.0%}" if g < a else f"24h 區間 ≥ {b:.0%}" if g >= b else f"24h 區間 {a:.0%}～{b:.0%}"
+        out["band"] = f"<{a:.0%}" if g < a else f"≥{b:.0%}" if g >= b else f"{a:.0%}～{b:.0%}"
     if i >= 1440 and k[i - 1440]["c"] > 0:
         c = (k[i]["c"] / k[i - 1440]["c"] - 1) * 100; out["chg24"] = round(c, 1)
-        out["watch"] = "實盤名單會盯（24h 漲≥40% 或跌≤−30%）" if (c >= WATCH[0] or c <= WATCH[1]) else "實盤名單不會盯"
+        out["watch"] = "會盯" if (c >= WATCH[0] or c <= WATCH[1]) else "不會盯"
     return out
 
 def trigger_segments(h1, r2h=TRIG["r2h"], r25h=TRIG["r25h"], pre=TRIG["pre"], post=TRIG["post"]):
@@ -102,9 +102,9 @@ def report(trades):
     for eid in ("F", "G"):
         ts = [t for t in trades if t.get("engine") == eid and isinstance(t.get("r"), (int, float))]
         rows = [dict(tag="全部", group="", **_stats([t["r"] for t in ts]))]
-        for tag, name in (("pop", "回測母體"), ("watch", "實盤名單"), ("band", "24h 區間")):
+        for tag, name in (("pop", "母體"), ("watch", "名單"), ("band", "24h區間")):
             groups = {}
-            for t in ts: groups.setdefault(t.get(tag) or "算不出來", []).append(t["r"])
+            for t in ts: groups.setdefault(t.get(tag) or "缺", []).append(t["r"])
             for g in sorted(groups): rows.append(dict(tag=name, group=g, **_stats(groups[g])))
         out[eid] = rows
     return out

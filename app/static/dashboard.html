@@ -93,6 +93,8 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
       兩個都跟上面的掃描、籌碼分析互斥。</div>
     <div class=row style=margin-top:8px><button class=go onclick="popstart('live')">實盤對照</button>
       <button class=go onclick="popstart('trigger')">無偏差母體（90 天）</button><button onclick="popload()">更新</button></div>
+    <div class=meta style=margin-top:6px>圖例：<b>母體</b> 在／不在＝進場那天（UTC）有沒有達到回測母體標準（G 當天漲 ≥30%、F 當天跌 ≥30%，用到進場之後的價格）·
+      <b>名單</b> 會盯／不會盯＝進場時 24h 漲 ≥40% 或跌 ≤−30% · <b>24h區間</b>＝進場時 24h 高／低 − 1 · 缺＝算不出來</div>
     <div id=popout class=meta>尚未執行</div>
   </div>
   <div class=card><h2>OI 前瞻驗證（實盤 F／G，只記不過濾）</h2>

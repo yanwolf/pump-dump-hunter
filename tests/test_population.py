@@ -34,9 +34,9 @@ kk = [dict(t=i * 60000, o=100.0, h=100.0, l=100.0, c=100.0, v=1.0) for i in rang
 g = population.entry_tags("G", kk, 1440, 160.0, 90.0, 100.0)
 check("P1", "（前提）1441 根：24h 區間 150/100 ＝ 50%、24h 漲跌（收盤比 1440 根前）＝ +50%", g["gain24"] == 50.0 and g["chg24"] == 50.0, f"{g}")
 check("P1", "G：當天最高 160／前收 100 ＝ +60% → 在暴漲日母體；24h 漲 50% ≥ 40% → 實盤名單會盯；區間 ≥ 40%",
-      g["pop"] == "在暴漲日母體" and g["watch"].startswith("實盤名單會盯") and g["band"] == "24h 區間 ≥ 40%", f"{g}")
+      g["pop"] == "在" and g["watch"] == "會盯" and g["band"] == "≥40%", f"{g}")
 f = population.entry_tags("F", kk, 1440, 160.0, 90.0, 100.0)
-check("P1", "F：當天最低 90／前收 100 只跌 10% → 不在崩盤日母體；區間 50% < 80%", f["pop"] == "不在崩盤日母體" and f["band"] == "24h 區間 < 80%", f"{f}")
+check("P1", "F：當天最低 90／前收 100 只跌 10% → 不在崩盤日母體；區間 50% < 80%", f["pop"] == "不在" and f["band"] == "<80%", f"{f}")
 short = population.entry_tags("G", kk[-100:], 99, None, None, None)
 check("P1", "不滿 24h 的 K、沒有日 K → 對應標籤都是 None（不硬算）", all(short[x] is None for x in ("pop", "watch", "band", "chg24")), f"{short}")
 
@@ -71,15 +71,15 @@ check("P3", "挑時段只看該小時為止：把拉升之後的 K 全換成平�
 
 print("分組報表")
 fx = fresh()
-tr = [dict(engine="G", r=2.0, pop="在暴漲日母體", watch="w", band="b"), dict(engine="G", r=-1.0, pop="不在暴漲日母體", watch="w", band="b"),
-      dict(engine="G", r=-1.0, pop="不在暴漲日母體", watch=None, band="b"), dict(engine="F", r=1.0, pop="在崩盤日母體", watch="w", band="b"),
-      dict(engine="G", r=None, pop="在暴漲日母體")]
+tr = [dict(engine="G", r=2.0, pop="在", watch="w", band="b"), dict(engine="G", r=-1.0, pop="不在", watch="w", band="b"),
+      dict(engine="G", r=-1.0, pop="不在", watch=None, band="b"), dict(engine="F", r=1.0, pop="在", watch="w", band="b"),
+      dict(engine="G", r=None, pop="在")]
 rep = population.report(tr)
 G = {(x["tag"], x["group"]): x for x in rep["G"]}
 check("P4", "（前提）G 全部 3 筆（R 未知的不算）：(2−1−1)/3 ＝ 0、PF 1.0", G[("全部", "")]["n"] == 3 and G[("全部", "")]["avg"] == 0.0 and G[("全部", "")]["pf"] == 1.0, f"{G[('全部', '')]}")
-check("P4", "依回測母體：在 1 筆 +2R、不在 2 筆 −2R", G[("回測母體", "在暴漲日母體")]["tot"] == 2.0 and G[("回測母體", "不在暴漲日母體")]["n"] == 2)
+check("P4", "依回測母體：在 1 筆 +2R、不在 2 筆 −2R", G[("母體", "在")]["tot"] == 2.0 and G[("母體", "不在")]["n"] == 2)
 Fr = {(x["tag"], x["group"]): x for x in rep["F"]}
-check("P4", "標籤是 None 的歸「算不出來」，不丟掉；F 自己一組", G[("實盤名單", "算不出來")]["n"] == 1 and Fr[("全部", "")]["n"] == 1)
+check("P4", "標籤是 None 的歸「缺」，不丟掉；F 自己一組", G[("名單", "缺")]["n"] == 1 and Fr[("全部", "")]["n"] == 1)
 
 print("啟動：只帶 F／G、排除停止追蹤的；跟掃描、籌碼分析互斥")
 fx = fresh()
@@ -122,7 +122,7 @@ json.dump([dict(symbol="XUSDT", engine="G", r=1.2, bar_t=full[0]["t"])] if full 
 os.environ["POP_JOB"] = "live"; population.main()
 st = population.state()
 lv = st.get("live", {}).get("report", {}).get("G", [])
-check("P6", "實盤對照完成：那筆貼上「在暴漲日母體」（當天漲到 +80%）", st.get("status", "").startswith("完成") and any(x["group"] == "在暴漲日母體" and x["n"] == 1 for x in lv), f"{st.get('status')} {lv}")
+check("P6", "實盤對照完成：那筆貼上「在暴漲日母體」（當天漲到 +80%）", st.get("status", "").startswith("完成") and any(x["tag"] == "母體" and x["group"] == "在" and x["n"] == 1 for x in lv), f"{st.get('status')} {lv}")
 os.environ["POP_JOB"] = "trigger"; os.environ["POP_DAYS"] = "10"; population.main()
 st = population.state()
 tg = st.get("trigger", {})
