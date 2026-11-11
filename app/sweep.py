@@ -22,7 +22,8 @@ def running():
 
 def start(days=30, overrides=None, label="", mode="pump"):
     global _proc
-    if running(): return False
+    from . import labels
+    if running() or labels.running(): return False       # 跟籌碼標籤分析互斥：兩個子程序同時抓 K 線會一起打滿權重
     env = dict(os.environ, SWEEP_DAYS=str(days), SWEEP_LABEL=label or "", SWEEP_MODE=mode,
                SWEEP_OVERRIDES=json.dumps(overrides or {}, ensure_ascii=False))
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 專案根目錄，子程序要以套件方式啟動

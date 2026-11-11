@@ -45,6 +45,8 @@ tests/test_r86.py     清單 r84→r86：重啟前後（真的存檔、重新載
 tests/test_r97.py     清單 r88→r98（第 6 條）：K 線 IP 權重——批次讓路／429 照 Retry-After／418 立刻停、實盤不排隊、事件掃描被限流整個中止不快取（python -m tests.test_r97）
 tests/test_r99.py     清單第 16 條：交易所一直拒絕平倉（-2022）的退讓與「停止追蹤」；模擬交易所 close_reject=reject／error（python -m tests.test_r99）
 tests/registry.py     測試檔登記表：tests/test_*.py 全部自動列入，逐檔檢查都從這裡拿清單；不參加的寫理由（r101）
+app/labels.py         籌碼標籤分析（研究用，不動實盤）：F／G 歷史交易貼上成交量分布與 OI 標籤、三等分比 PF／平均 R、前後段一致性、置換檢定
+tests/test_labels.py  籌碼標籤分析（手算的成交量分布、OI 不偷看、404 與抓不到分開、跟掃描互斥）＋ simulate_each 套件匯入的回歸
 tests/test_maxqty.py  交易所市價單數量上限（-4005，2026-09-22 SKRUSDT 實單）：開倉壓到上限、平倉分批
 tests/legacy/rNN/     每輪修改前的後端程式（只留最近兩版：r78、r88）；python -m tests.rerun_old legacy:rNN
 tests/check_indexing.py 先索引沒先確認的靜態檢查；--self-test 自我驗證
@@ -139,6 +141,20 @@ Binance 2025-12-09 起把條件單搬到 `/fapi/v1/algoOrder`，舊的 `/fapi/v1
 - 所有會改東西的 API 需要本頁送出的 `X-PDH` 標頭，外站連結點不動。
 - 全站時間統一 UTC+8（`APP_TZ`）。例外：掃描的 peak_day 是 Binance 日 K 日期（UTC 切日）。
 - 已平倉會記實際出場價、損益（扣手續費）、R 值；「清除」會一起清訊號和已平倉，已下單紀錄保留。
+
+## 籌碼標籤分析（2026-11-11）
+研究頁「籌碼標籤分析」：F 用崩盤日、G 用暴漲日母體（跟掃描同一份事件快取、1m K 線快取、同一個 simulate，參數照實盤覆蓋），
+每筆交易在進場那根 1m 收盤時算 8 個標籤：成交量分布 4 個（相對主峰、獲利比例、上方／下方 2% 量占比，24h 1m K）、
+OI 4 個（1h、24h 變化、距 24h 高點、大戶持倉多空比）。
+- OI 來源是 data.binance.vision 每日 metrics 檔（5 分鐘一筆）。`/futures/data/openInterestHist` 只有最近 30 天，90 天回測不能用。
+- 只用「時間戳 + 5 分鐘 ≤ 進場時間」的列（保守，不偷看）。兩天前以前的 404 = 幣安沒有這天的檔，快取成空；
+  最近兩天的 404 與其他錯誤 = 抓不到，不快取，那筆交易歸「無資料」組。
+- 判讀：高組 vs 低組平均 R 的置換檢定 p < 0.05，**而且**前後兩段同向，才算濾網候選。8 標籤 × 2 引擎＝16 個檢定，運氣也會冒出一個。
+- 跟歷史事件掃描互斥（兩個子程序同時抓 K 線會一起打滿權重）。結束時推播一次。
+
+## 2026-11-11 修正：歷史事件掃描 09-21 起其實是壞的
+`backtest.simulate_each` 裡寫 `from signals import ENGINE_TF`（搬進 app/ 之前的寫法），套件模式下 ModuleNotFoundError，
+掃描每個事件都記成「抓取／回測失敗」。改成 `from .signals import`（`diag_a` 同樣問題一起改）。09-20 的 90 天判決是搬家前跑的，不受影響。
 
 ## 還沒做的
 - F 和 G 的實盤滑價數據還沒累積夠（回測假設 0.3%）

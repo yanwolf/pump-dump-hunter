@@ -56,7 +56,7 @@ def simulate(k, engine_ids=("A", "B", "C", "D", "E")):
 
 def simulate_each(k, k1m=None):
     """各引擎獨立跑，互不佔用倉位；1m 引擎用 k1m。"""
-    from signals import ENGINE_TF
+    from .signals import ENGINE_TF
     out = []
     for e in ENGINES:
         if ENGINE_TF.get(e) == "1m":
@@ -84,7 +84,7 @@ def run(symbol, days):
 
 def diag_a(symbol, days):
     """引擎 A 診斷：列出所有「跌破中樞」的棒，以及它們被哪個條件擋掉。"""
-    from signals import engine_a_flags
+    from .signals import engine_a_flags
     end = int(time.time() * 1000); k = B.klines_range(symbol, "5m", end - days * 86400000, end)
     need = ("hot", "pivot", "top", "vol", "first")
     rows, cnt = [], dict(bars=len(k), hot=0, pivot=0, top=0, vol=0, first=0, div=0, brk=0, all=0)
