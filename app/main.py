@@ -413,11 +413,14 @@ def _signals(state):
                 elif any(p["symbol"] == s for p in ex):
                     rec["skipped"] = "該幣帳號內已有倉（其他專案）"
                 if rec.get("skipped"):
+                    _attach_oi(s, eid, rec)
                     store.push("signals", rec); telegram.send(f"⏸ 略過 {s} 引擎{eid}：{rec['skipped']}"); break
                 rec = place(s, eid, sig, sz, rec)
+            _attach_oi(s, eid, rec)                  # 下單之後才抓（不拖慢送單）；只用進場前的資料，結果跟先抓一樣
             store.push("signals", rec)
             telegram.send(f"{'✅下單' if rec['executed'] else '👀訊號'} {s} 引擎{eid} {'多' if sig.side == 'LONG' else '空'} @{sig.entry:.5g} "
-                          f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U" + (f" 成交{rec['fill']:.5g} 滑價{rec['slip_pct']}%" if rec.get("fill") else "") + f"\n{sig.reason}")
+                          f"止損{sig.stop:.5g}({sz['stop_pct']}%) {sz['leverage']}x {sz['notional']}U" + (f" 成交{rec['fill']:.5g} 滑價{rec['slip_pct']}%" if rec.get("fill") else "") + f"\n{sig.reason}"
+                          + (f"\nOI 1h {rec['oi_1h']:+.1f}%" if isinstance(rec.get("oi_1h"), (int, float)) else ""))
             break
       except Exception as e:
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {s} {e}"); traceback.print_exc()
@@ -427,6 +430,22 @@ def _signals(state):
         msg = f"⚠️ 引擎迴圈 {took}s / {len(state["watch"])} 檔，接近輪詢間隔 {POLL_SEC}s，可能漏 K 線"
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
         if took > POLL_SEC: telegram.send(msg)
+
+def _attach_oi(s, eid, rec):
+    """前瞻驗證（研究用）：F／G 訊號記下開倉當下的 OI 標籤，只記、不過濾。抓不到記原因，絕不影響下單與記帳。
+    已成交的同時寫進持倉紀錄，平倉時跟著進已平倉，研究頁才能依 OI 分組看實盤 R。"""
+    if ENGINE_TF.get(eid) != "1m" or not rec.get("bar_t"): return
+    try: rec.update(labels.live_oi(s, rec["bar_t"]))
+    except Exception as e:
+        rec["oi_err"] = str(e)[:80]; return
+    if not rec.get("executed"): return
+    try:
+        own = dict(store.get().get("open", {}))
+        p = own.get(s)
+        if p and p.get("engine") == eid and p.get("bar_t") == rec["bar_t"]:
+            own[s] = dict(p, **{k: rec.get(k) for k in labels.OI_KEYS}); store.update(open=own)
+    except Exception as e:
+        store.push("errors", f"{time.strftime('%m-%d %H:%M')} {s} 持倉紀錄寫 OI 標籤失敗 {e}")
 
 def _refresh():
     """手動動作後立刻重抓帳號持倉，畫面不用等下一輪迴圈。"""
@@ -643,6 +662,10 @@ class H(BaseHTTPRequestHandler):
             except ValueError: d = 90
             ok = labels.start(d)
             body, ct = json.dumps(dict(started=ok, error=None if ok else "已有籌碼分析或歷史事件掃描在跑，等它跑完"), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/forward"):
+            try: res = labels.forward(store.get().get("closed", []), labels.frozen_cuts())
+            except Exception as e: res = dict(error=str(e))
+            body, ct = json.dumps(res, ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/labels"):
             body, ct = json.dumps(labels.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/sweep"):

@@ -87,6 +87,12 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
       <button class=go onclick="lbstart()">開始分析</button><button onclick="lbload()">更新</button></div>
     <div id=lbout class=meta>尚未執行</div>
   </div>
+  <div class=card><h2>OI 前瞻驗證（實盤 F／G，只記不過濾）</h2>
+    <div class=meta>每筆 F／G 訊號記下開倉當下的 OI 標籤，平倉後依回測的三等分界線分組。界線在第一次打開這裡時從籌碼標籤分析凍結，之後重跑分析也不會改。
+      要驗證的假設：F 的 OI 在掉（1h 變化、距 24h 高點的低組）較好；G 的 OI 1h 中間組較好。每組至少累積 30 筆再下結論。</div>
+    <div class=row style=margin-top:8px><button onclick="fwload()">更新</button></div>
+    <div id=fwout class=meta>載入中…</div>
+  </div>
   <div class=card><h2>交易所相容性自檢</h2>
     <div class=meta>幣安改 API 時不要等到下單才發現。開機會自動跑一次，這裡可以手動重跑。</div>
     <div class=row style=margin-top:8px><button class=go onclick="pf()">執行自檢</button></div>
@@ -192,7 +198,7 @@ async function load(){let s;try{s=await (await F('/api/state')).json()}catch(e){
  $('t_rest').innerHTML=PERF(s.stats)+`
  <div class=card><h2>已平倉 · 最新在上${(s.closed||[]).some(x=>x.pnl==null)?` <span class=meta>（其中 ${(s.closed||[]).filter(x=>x.pnl==null).length} 筆損益未知，不算進任何加總）</span>`:''}</h2>${T((s.closed||[]).slice().reverse().slice(0,30).map(x=>x.pnl==null?{...x,pnl:'未知'}:x),['closed','symbol','engine','side','fill','exit','pnl','r','qty','by'])}</div>
  <div class=card><h2>訊號 · 最新在上 <button onclick="sigclear()" style="font-size:11px;padding:3px 8px">清除</button></h2>
-   ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','margin','notional','executed','skipped','stop_error','reason'])}</div>`}
+   ${T(sig,['time','symbol','engine','side','entry','fill','slip_pct','stop','stop_pct','oi_1h','oi_off_hi','margin','notional','executed','skipped','stop_error','reason'])}</div>`}
 
 
 async function bt(){const o=$('btout');o.innerHTML='跑中…';
@@ -233,7 +239,8 @@ async function lbload(){const o=$('lbout');const r=await (await F('/api/labels')
  let h=`<b>${r.status}</b><div class=meta>${r.days||''} 天 · 參數：${r.params||'—'} · 前後段分界 ${r.split||'—'} · 開始 ${r.started||'—'}</div>`;
  for(const [e,E] of Object.entries(r.engines||{})){const b=E.base||{};
   h+=`<h2 style=margin-top:12px>引擎 ${e}（${E.mode==='crash'?'崩盤日':'暴漲日'} ${E.events} 事件）· ${b.n||0} 筆 PF ${fx(b.pf)} 平均 ${cr(b.avg)}R 總 ${fx(b.tot,1)}R</h2>`+
-   (E.oi_missing_days?`<div class=meta>OI 每日檔有 ${E.oi_missing_days} 天暫時抓不到（沒快取，重跑會補）；那幾天的交易歸「無資料」</div>`:'');
+   (E.oi_missing_days?`<div class=meta>OI 每日檔有 ${E.oi_missing_days} 天抓取失敗（沒快取，重跑會補）；那幾天的交易歸「無資料」</div>`:'')+
+   (E.oi_notyet_days?`<div class=meta>最近 ${E.oi_notyet_days} 天的每日檔幣安還沒產生（正常，隔天才有）</div>`:'');
   for(const L of E.labels||[]){
    const tag=(L.verdict||'').startsWith('候選')?'hot':'meta';
    h+=`<details style="margin:6px 0"><summary><b>${L.name}</b> <span class=${tag}>${L.verdict||''}</span>`+
@@ -245,6 +252,10 @@ async function lbload(){const o=$('lbout');const r=await (await F('/api/labels')
     '</table></div></details>'}}
  o.innerHTML=h;
  if(!r.status.startsWith('完成')&&!r.status.startsWith('失敗')&&!r.status.startsWith('中止'))setTimeout(lbload,5000)}
+
+async function fwload(){const o=$('fwout');const r=await (await F('/api/forward')).json();
+ if(r.error){o.innerHTML=r.error;return}
+ o.innerHTML=`界線凍結於 ${r.frozen_at||'—'} · 已平倉 F／G 共 ${r.n} 筆`+T(r.rows.map(x=>({...x,win:x.win!=null?x.win+'%':'',total:x.tot})),['engine','label','cut','group','n','win','pf','avg','total','hypo'])}
 
 let PS=[],PRE={},LIVE={};
 function ptoggle(){const p=$('pform');p.style.display=p.style.display=='none'?'':'none';if(!PS.length)pform()}
@@ -282,4 +293,4 @@ async function pf(){const o=$('pfout');o.innerHTML='檢查中…';
  if(r.error){o.innerHTML='<span style=color:var(--down)>'+r.error+'</span>';return}
  o.innerHTML=r.results.map(x=>`${x.status=='ok'?'✅':x.status=='warn'?'⚠️':'❌'} ${x.item}　<span class=meta>${x.msg||''}</span>`).join('<br>')+(r.cached?`<br><span class=meta>（${r.age} 秒前的結果；自檢會打高權重查詢，60 秒內不重跑）</span>`:'')}
 async function sigclear(){if(!confirm('清除「訊號」和「已平倉」紀錄？（已下單紀錄保留）'))return;await F('/api/signals/clear');load()}
-load();swload().catch(()=>{});lbload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>
+load();swload().catch(()=>{});lbload().catch(()=>{});fwload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>

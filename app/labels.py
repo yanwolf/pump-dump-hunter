@@ -147,6 +147,8 @@ def analyse(trades, key, split_ts, perm=PERM, seed=7):
     if p < 0.05 and same and not small:
         better = "高" if diff > 0 else "低"
         out["verdict"] = f"候選：{better}組明顯較好、前後兩段同向（還要看排除另一組會砍掉幾筆前 10 大單）"
+    elif p < 0.05 and same:
+        out["verdict"] = "p < 0.05、兩段同向，但有半段樣本不到 15 筆 → 還不能判斷，看前瞻驗證"
     elif p < 0.05 and not same:
         out["verdict"] = "全期有差，但前後兩段方向不一致 → 不採用"
     elif same and not small:
@@ -154,6 +156,65 @@ def analyse(trades, key, split_ts, perm=PERM, seed=7):
     else:
         out["verdict"] = "看不出差異"
     return out
+
+# ---------- 實盤前瞻驗證 ----------
+OI_KEYS = ("oi_1h", "oi_24h", "oi_off_hi")          # 實盤訊號當下記的 OI 標籤（只記、不過濾）
+FROZEN = os.path.join(DATA_DIR, "forward_cuts.json")
+HYPO = {("F", "oi_1h"): "低", ("F", "oi_off_hi"): "低", ("G", "oi_1h"): "中"}   # 回測看到、等前瞻驗證的假設：哪組較好
+
+def live_oi(symbol, bar_t, hist=None):
+    """實盤訊號當下的 OI 標籤，算法跟回測同一個 oi_labels（同樣只用時間戳 + 5 分鐘 <= 進場時間的列）。
+    資料走 /futures/data/openInterestHist（5m、最近 25 小時）。抓不到就拋例外，呼叫端記原因，不影響下單。"""
+    if hist is None:
+        from . import binance as B
+        hist = B.oi_hist(symbol, "5m", 300)
+    if not isinstance(hist, list) or not hist: raise RuntimeError("openInterestHist 回空")
+    rows = sorted((int(x["timestamp"]), float(x["sumOpenInterest"]), float(x.get("sumOpenInterestValue") or 0), None) for x in hist)
+    o = oi_labels(rows, bar_t + 60000)
+    return {k: o[k] for k in OI_KEYS}
+
+def _cuts_from(st):
+    """labels.json 的三等分界線：低組上界、高組下界（範圍字串 'a ~ b'）。"""
+    out = {}
+    for eid, R in (st.get("engines") or {}).items():
+        for L in R.get("labels") or []:
+            g = {x.get("name"): x for x in L.get("groups") or []}
+            if L.get("key") not in OI_KEYS or "低" not in g or "高" not in g: continue
+            try: out[f"{eid}.{L['key']}"] = [float(g["低"]["rng"].split("~")[1]), float(g["高"]["rng"].split("~")[0])]
+            except Exception: continue
+    return out
+
+def frozen_cuts(path=None):
+    """前瞻驗證的分組界線：第一次用時從回測結果凍結下來，之後固定（重跑回測不會改到，避免看了新資料再挪界線）。"""
+    path = path or FROZEN
+    try: return json.load(open(path))
+    except Exception: pass
+    st = state()
+    if not str(st.get("status", "")).startswith("完成"): return None
+    cuts = _cuts_from(st)
+    if not cuts: return None
+    d = dict(cuts=cuts, at=time.strftime("%m-%d %H:%M"), source=st.get("started"))
+    json.dump(d, open(path, "w"), ensure_ascii=False); return d
+
+def forward(closed, frozen):
+    """已平倉的 F／G 依開倉當下的 OI 標籤分組（凍結界線），看回測的假設在新資料上成不成立。"""
+    if not frozen: return dict(error="還沒有完成的籌碼標籤分析可以凍結分組界線")
+    closed = [t for t in (closed or []) if not t.get("excluded") and t.get("engine") in ("F", "G")]
+    rows = []
+    for key_, (lo, hi) in sorted(frozen["cuts"].items()):
+        eid, key = key_.split(".", 1)
+        ts = [t for t in closed if t.get("engine") == eid]
+        grp = {"低": [], "中": [], "高": [], "無資料": []}
+        for t in ts:
+            v = t.get(key)
+            if not isinstance(t.get("r"), (int, float)): continue        # R 未知的不算（跟績效統計一致）
+            name = "無資料" if not isinstance(v, (int, float)) else "低" if v <= lo else "高" if v >= hi else "中"
+            grp[name].append(t["r"])
+        for name, rs in grp.items():
+            st = _stats(rs)
+            rows.append(dict(engine=eid, label=key, cut=f"{lo:g} / {hi:g}", group=name, n=st["n"], win=st.get("win"),
+                             pf=st.get("pf"), avg=st.get("avg"), tot=st.get("tot"), hypo="✓ 假設較好" if HYPO.get((eid, key)) == name else ""))
+    return dict(frozen_at=frozen.get("at"), rows=rows, n=len(closed))
 
 # ---------- OI 每日檔 ----------
 def _ymd(ms): return time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))
@@ -178,6 +239,9 @@ def parse_metrics(raw):
 class Missing(RuntimeError):
     """這一天的檔案暫時抓不到（網路錯、5xx、還沒產生）。不能當成「這天沒有 OI」寫進快取。"""
 
+class NotYet(Missing):
+    """最近兩天的 404：幣安每日檔隔天才產生，不是抓取失敗。"""
+
 def _http(url):
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "pdh-research"}), timeout=30) as r:
@@ -200,7 +264,7 @@ def metrics_day(sym, ymd, kdir, fetch=None, now_ms=None):
         now_ms = now_ms or int(time.time() * 1000)
         if calendar.timegm(time.strptime(ymd, "%Y-%m-%d")) * 1000 < now_ms - 2 * DAY:
             json.dump([], open(p, "w")); return []
-        raise Missing(f"{ymd} 的檔案還沒產生")
+        raise NotYet(f"{ymd} 的檔案還沒產生")
     rows = parse_metrics(raw); json.dump(rows, open(p, "w")); return rows
 
 # ---------- 子程序 ----------
@@ -239,9 +303,9 @@ def main():
                 if failed:
                     _end(f"中止：{len(failed)} 檔日線抓不到，母體不完整（{failed[0]}）——過幾分鐘再跑"); return
                 sweep._save(ek, events)
-            trades, oi_miss = [], 0
+            trades, oi_miss, oi_new = [], 0, 0
             for n, ev in enumerate(events):
-                if n % 10 == 0: _write(status=f"{eid}：{n}/{len(events)} 個事件，{len(trades)} 筆交易，OI 缺 {oi_miss} 天")
+                if n % 10 == 0: _write(status=f"{eid}：{n}/{len(events)} 個事件，{len(trades)} 筆交易，OI 抓不到 {oi_miss} 天")
                 pk = ev["peak_ts"]
                 try:
                     k1m = sweep._cached(f"{ev['symbol']}_1m_{pk}", lambda: B.klines_range(ev["symbol"], "1m", pk - DAY, pk + 2 * DAY))
@@ -255,7 +319,9 @@ def main():
                 idx = {x["t"]: j for j, x in enumerate(k1m)}
                 oi = []
                 for d in range(-2, 3):                      # 交易在 peak-1d～peak+2d，OI 24h 要再往前一天
+                    if pk + d * DAY > run_ms: continue      # 還沒到的日子：本來就不會有交易，不抓也不算缺
                     try: oi += metrics_day(ev["symbol"], _ymd(pk + d * DAY), sweep.KDIR)
+                    except NotYet: oi_new += 1
                     except Missing: oi_miss += 1
                     time.sleep(0.03)
                 oi.sort()
@@ -268,7 +334,7 @@ def main():
                     row.update(oi_labels(oi, t["t"] + 60000))
                     trades.append(row)
             base = _stats([t["r"] for t in trades])
-            report[eid] = dict(mode=mode, events=len(events), base=base, oi_missing_days=oi_miss,
+            report[eid] = dict(mode=mode, events=len(events), base=base, oi_missing_days=oi_miss, oi_notyet_days=oi_new,
                                labels=[dict(analyse(trades, k, split_ts), name=nm, help=hp) for k, nm, hp in LABELS])
             rows_all += trades
             _write(engines=report)

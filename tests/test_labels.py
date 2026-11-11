@@ -1,7 +1,7 @@
 # 籌碼標籤分析（app/labels.py）與 backtest.simulate_each 的套件匯入。預期值手算。
 # 在專案根目錄執行：python -m tests.test_labels
 import io, json, os, zipfile
-from tests.harness import (TG, check, fresh, finish)   # 共用案例框架
+from tests.harness import (TG, check, fresh, finish, main, manager, store)   # 共用案例框架
 from app import backtest, labels, sweep
 
 DAY = 86400000
@@ -141,5 +141,97 @@ check("L7", "F 那筆有成交量分布與 OI 標籤", fr and fr[0].get("vp_prof
 check("L7", "每個引擎 8 個標籤都有判讀", all(len(E[e]["labels"]) == 8 and all(L.get("verdict") for L in E[e]["labels"]) for e in E))
 check("L7", "OI 從 data.binance.vision 的 metrics 檔抓", fetched and all("data.binance.vision/data/futures/um/daily/metrics/XUSDT/" in u for u in fetched), f"{fetched[:1]}")
 json.dumps(st)
+
+print("判讀：p < 0.05、兩段同向但半段樣本太少 → 不能寫成「看不出差異」（11-11 實盤畫面 F 的 OI 距高點 p 0.04 就是這樣）")
+fx = fresh()
+small = [dict(r=(3.0 if i % 4 else -1.0) if i >= 26 else (-1.0 if i < 13 else 0.0), t=500 if i % 2 else 1500, x=float(i)) for i in range(39)]
+c = labels.analyse(small, "x", SPLIT)
+check("L8", "（前提）39 筆三等分各 13 筆，每組半段只有 6～7 筆；高組明顯好、p < 0.05、兩段同向", c["p"] < 0.05 and c["same"], f"{c['p']} {c['same']}")
+check("L8", "判讀說明樣本不足，不是「看不出差異」", "樣本不到 15 筆" in c["verdict"] and c["verdict"] != "看不出差異", c["verdict"])
+
+print("OI 每日檔：還沒到的日子不抓；最近兩天的 404 跟抓取失敗分開數")
+fx = fresh()
+err = None
+try: labels.metrics_day("ZUSDT", "2026-09-20", KD, fetch=lambda u: None, now_ms=NOW)
+except labels.Missing as e: err = e
+check("L9", "最近兩天的 404 是 NotYet（仍是 Missing 的一種，照樣不寫快取）", isinstance(err, labels.NotYet), repr(err))
+err = None
+try: labels.metrics_day("ZUSDT", "2026-08-03", KD, fetch=boom, now_ms=NOW)
+except labels.Missing as e: err = e
+check("L9", "5xx 是 Missing 但不是 NotYet", isinstance(err, labels.Missing) and not isinstance(err, labels.NotYet), repr(err))
+
+print("實盤前瞻：開倉當下的 OI 標籤，算法跟回測同一個")
+fx = fresh()
+BT = T0 + 289 * 300000                  # 進場那根 1m 的開盤時間；進場時間 = BT + 60s
+hist = [dict(timestamp=r[0], sumOpenInterest=str(r[1]), sumOpenInterestValue="0") for r in rows]
+lo_ = labels.live_oi("XUSDT", BT, hist=hist)
+check("L10", "跟回測的 oi_labels 同一組數字（第 289 筆 999 還不能用）", lo_ == dict(oi_1h=50.0, oi_24h=50.0, oi_off_hi=0.0), f"{lo_}")
+err = None
+try: labels.live_oi("XUSDT", BT, hist={})
+except Exception as e: err = e
+check("L10", "openInterestHist 回空 → 拋例外（呼叫端記原因），不給全 None 假裝有抓", err is not None and "回空" in str(err), repr(err))
+
+class Sig:
+    def __init__(s, side="LONG", entry=1.0, stop=0.9): s.side, s.entry, s.stop, s.engine, s.reason = side, entry, stop, "G", "t"
+SZ = dict(qty=100, leverage=10, risk_usdt=10, usable=1000, notional=100, stop_pct=10)
+
+print("實盤前瞻：成交的 G 單，OI 標籤寫進訊號與持倉，平倉後跟著進已平倉")
+fx = fresh()
+assert hasattr(main, "_attach_oi")                 # 舊版沒有前瞻記錄：這段整個不能跑
+fake = dict(oi_1h=1.5, oi_24h=20.0, oi_off_hi=-3.0)
+labels.live_oi = lambda s_, bt: dict(fake)
+rec = main.place("XUSDT", "G", Sig(), dict(SZ), dict(time="t", bar_t=BT))
+check("L11", "（前提）市價單成交、帳上有這筆", rec.get("executed") is True and "XUSDT" in store.get().get("open", {}), f"{rec.get('skipped')}")
+main._attach_oi("XUSDT", "G", rec)
+pos = store.get().get("open", {}).get("XUSDT") or {}       # 前提不成立（突變下沒開成）時不能崩
+check("L11", "訊號紀錄有 OI 1h／24h／距高點", all(rec.get(k) == v for k, v in fake.items()), f"{rec}")
+check("L11", "持倉紀錄也有（平倉時整筆複製進已平倉）", all(pos.get(k) == v for k, v in fake.items()), f"{pos}")
+if pos:
+    try: manager.close_now("XUSDT", dict(pos), "手動")
+    except manager.CloseFailed: pass
+cl = (store.get().get("closed") or [{}])[-1]
+check("L11", "已平倉那筆帶著開倉當下的 OI 標籤", cl.get("symbol") == "XUSDT" and cl.get("oi_1h") == 1.5 and cl.get("oi_off_hi") == -3.0, f"{cl}")
+
+print("實盤前瞻：抓不到 OI 只記原因；5m 引擎不抓")
+fx = fresh()
+assert hasattr(main, "_attach_oi")
+def oi_fail(s_, bt): raise RuntimeError("HTTP 503 x")
+labels.live_oi = oi_fail
+rec = dict(time="t", bar_t=BT, executed=False)
+main._attach_oi("XUSDT", "F", rec)
+check("L12", "（前提）F 是 1m 引擎，有試著抓：記下失敗原因", rec.get("oi_err", "").startswith("HTTP 503"), f"{rec}")
+check("L12", "失敗不寫假的 OI 值、也不推錯誤區（研究欄位，不是故障）", "oi_1h" not in rec and not store.get().get("errors"), f"{rec} {store.get().get('errors')}")
+called = []
+labels.live_oi = lambda s_, bt: called.append(s_) or dict(fake)
+rec = dict(time="t", bar_t=BT, executed=False)
+main._attach_oi("XUSDT", "C", rec)
+check("L12", "C（5m 引擎）不抓 OI", called == [] and "oi_1h" not in rec and "oi_err" not in rec, f"{called} {rec}")
+
+print("前瞻驗證：分組界線從回測凍結一次，之後固定")
+fx = fresh()
+FR = os.path.join(KD, "frozen.json")
+if os.path.exists(FR): os.remove(FR)
+GR = lambda a0, a1, b0, b1: [dict(name="低", rng=f"{a0} ~ {a1}"), dict(name="中", rng="x"), dict(name="高", rng=f"{b0} ~ {b1}")]
+json.dump(dict(status="完成：11-11 16:30", started="11-11 15:58", engines=dict(
+    G=dict(labels=[dict(key="oi_1h", groups=GR(-8.9, 0.4, 3.7, 33.6)), dict(key="vp_poc", groups=GR(-5, -1, 1, 5))]),
+    F=dict(labels=[dict(key="oi_off_hi", groups=GR(-60, -20, -5, 0))]))), open(labels.STATE, "w"))
+st0 = labels.state()
+check("L13", "（前提）分析狀態是完成、有 G 的 OI 1h 與成交量分布標籤、F 的距高點", str(st0.get("status", "")).startswith("完成") and len(st0["engines"]["G"]["labels"]) == 2)
+fz = labels.frozen_cuts(FR)
+check("L13", "第一次：從分析結果凍結 OI 標籤的界線（低組上界、高組下界），成交量分布的不收",
+      fz is not None and fz["cuts"] == {"G.oi_1h": [0.4, 3.7], "F.oi_off_hi": [-20.0, -5.0]} and os.path.exists(FR), f"{fz}")
+json.dump(dict(st0, engines={}), open(labels.STATE, "w"))
+check("L13", "分析結果之後換掉了，凍結的界線不變", labels.frozen_cuts(FR) == fz)
+cuts = dict(cuts={"G.oi_1h": [0.4, 3.7], "F.oi_off_hi": [-20.0, -5.0]}, at="11-11 17:00")
+closed = [dict(engine="G", r=2.0, oi_1h=1.0), dict(engine="G", r=-1.0, oi_1h=0.4), dict(engine="G", r=-1.0, oi_1h=10.0),
+          dict(engine="G", r=1.0), dict(engine="G", r=None, oi_1h=1.0), dict(engine="F", r=1.5, oi_off_hi=-30.0),
+          dict(engine="C", r=5.0, oi_1h=1.0), dict(engine="G", r=9.0, oi_1h=1.0, excluded=True)]
+fw = labels.forward(closed, cuts)
+g = {(x["engine"], x["label"], x["group"]): x for x in fw["rows"]}
+check("L13", "G 中組：1.0 在 (0.4, 3.7) 之間 → 1 筆 +2R；剛好 0.4 歸低組；10 歸高組",
+      g[("G", "oi_1h", "中")]["n"] == 1 and g[("G", "oi_1h", "中")]["tot"] == 2.0 and g[("G", "oi_1h", "低")]["n"] == 1 and g[("G", "oi_1h", "高")]["n"] == 1, f"{fw['rows']}")
+check("L13", "沒有 OI 的歸無資料；R 未知、停止追蹤、C 引擎都不算", g[("G", "oi_1h", "無資料")]["n"] == 1 and fw["n"] == 6, f"{fw['n']}")
+check("L13", "假設標記：G 的 OI 1h 中組、F 的距高點低組", g[("G", "oi_1h", "中")]["hypo"] and g[("F", "oi_off_hi", "低")]["hypo"] and not g[("G", "oi_1h", "高")]["hypo"])
+check("L13", "還沒有可凍結的分析 → 回錯誤說明，不給空表", labels.forward(closed, None).get("error"))
 
 finish()
