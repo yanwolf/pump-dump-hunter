@@ -9,6 +9,9 @@ from . import backtest, binance as B, config as C, labels, manager, population, 
 from .signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
+# 只記訊號、不下單的引擎（2026-11-11：F、G 在無偏差母體上 PF 0.78／0.79，沒有優勢；保留訊號與 OI 前瞻記錄）。
+# 要恢復下單：環境變數 SIGNAL_ONLY 設成空字串（或只留要停的）。
+SIGNAL_ONLY = set(x for x in os.environ.get("SIGNAL_ONLY", "F,G").split(",") if x)
 TRADE = os.environ.get("TRADE", "0") == "1"
 STOP_FAIL_CLOSE = os.environ.get("STOP_FAIL", "close") == "close"   # 停損單掛不上時：close=立刻平倉 keep=只告警
 PASSWORD = os.environ.get("DASH_PASSWORD", "")                        # 網頁密碼；沒設定時手動操作全部停用
@@ -327,7 +330,7 @@ def loop():
         lf = {}; store.push("errors", f"{time.strftime('%m-%d %H:%M')} 實盤參數覆蓋載入失敗 {e}")
     store.update(started=time.strftime("%Y-%m-%d %H:%M:%S"), live_overrides=lf)
     if lf: telegram.send(f"⚙️ 套用實盤參數覆蓋 {len(lf)} 項：" + ", ".join(f"{k.split('.')[-1]}={v}" for k, v in lf.items()))
-    telegram.send(f"🎯 pump-dump-hunter 啟動 engines={sorted(ENABLED)} trade={TRADE} testnet={C.USE_TESTNET}")
+    telegram.send(f"🎯 pump-dump-hunter 啟動 engines={sorted(ENABLED)} 只記不下單={sorted(SIGNAL_ONLY & ENABLED)} trade={TRADE} testnet={C.USE_TESTNET}")
     try: preflight.run_and_report()          # 交易所 API 有沒有又改，開機就知道
     except Exception as e: store.push("errors", f"{time.strftime('%m-%d %H:%M')} 自檢失敗 {e}")
     state = dict(watch={}, last={}, last_scan=0)
@@ -399,6 +402,8 @@ def _signals(state):
             sz = risk.size(sig)
             if not sz: continue                      # 止損距離超過上限，略過
             rec = dict(time=time.strftime("%m-%d %H:%M"), symbol=s, **sig.__dict__, **sz, executed=False, bar_t=kk[-1]["t"])
+            if eid in SIGNAL_ONLY:
+                _paper(state, s, eid, rec); continue              # 不下單、不佔持倉名額、不擋同幣其他引擎
             if TRADE and C.API_KEY:
                 n_own, ex = reconcile(force=True)   # 要下單了，用最新的
                 mine = store.get().get("open", {})
@@ -430,6 +435,17 @@ def _signals(state):
         msg = f"⚠️ 引擎迴圈 {took}s / {len(state["watch"])} 檔，接近輪詢間隔 {POLL_SEC}s，可能漏 K 線"
         store.push("errors", f"{time.strftime('%m-%d %H:%M')} {msg}")
         if took > POLL_SEC: telegram.send(msg)
+
+def _paper(state, s, eid, rec):
+    """只記訊號：寫進訊號表（含 OI 標籤），不推播。沒有真的部位，所以照回測「持有＋冷卻」的長度擋掉同一波的後續訊號，
+    否則條件成立的每一根都會記一筆。"""
+    P = manager.rules(eid); span = (P.get("max_hold_bars", 0) + P.get("cooldown_bars", 0)) * manager.TF_MS[manager.tf_of(eid)]
+    paper = state.setdefault("paper", {}); tag = f"{s}:{eid}"
+    if rec["bar_t"] - paper.get(tag, -10**15) < span: return
+    paper[tag] = rec["bar_t"]
+    rec["skipped"] = "只記訊號不下單（無偏差母體沒有優勢）"
+    _attach_oi(s, eid, rec)
+    store.push("signals", rec)
 
 def _attach_oi(s, eid, rec):
     """前瞻驗證（研究用）：F／G 訊號記下開倉當下的 OI 標籤，只記、不過濾。抓不到記原因，絕不影響下單與記帳。

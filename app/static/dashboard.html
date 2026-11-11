@@ -87,10 +87,11 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
       <button class=go onclick="lbstart()">開始分析</button><button onclick="lbload()">更新</button></div>
     <div id=lbout class=meta>尚未執行</div>
   </div>
-  <div class=card><h2>母體偏差檢查（F／G，研究用，不動實盤）</h2>
+  <div class=card><h2>母體偏差檢查（C／F／G，研究用，不動實盤）</h2>
     <div class=meta>實盤對照：已平倉的 F／G 逐筆看「當天有沒有達到回測母體標準」「實盤名單會不會盯」「進場時 24h 區間」，幾分鐘。<br>
       無偏差母體：不看當天結果，用引擎自己的必要條件（2h 高低差 ≥10% 且 25h 高低差 ≥15%）挑時段重跑 F、G，同樣三種分組，約一小時，跑完推播。
       兩個都跟上面的掃描、籌碼分析互斥。</div>
+    <div class=meta>無偏差母體含 C（5m：2h 高低差 ≥15% 的時段）；交易另外貼 OI 標籤、每組附前後段。</div>
     <div class=row style=margin-top:8px><button class=go onclick="popstart('live')">實盤對照</button>
       <button class=go onclick="popstart('trigger')">無偏差母體（90 天）</button><button onclick="popload()">更新</button></div>
     <div class=meta style=margin-top:6px>圖例：<b>母體</b> 在／不在＝進場那天（UTC）有沒有達到回測母體標準（G 當天漲 ≥30%、F 當天跌 ≥30%，用到進場之後的價格）·
@@ -269,12 +270,21 @@ async function popload(){const o=$('popout');const r=await (await F('/api/popula
  if(!r.status){o.innerHTML='尚未執行';return}
  const fx=(v,d=2)=>v===null||v===undefined?'—':(typeof v==='number'?v.toFixed(d):v);
  const cr=v=>v===null||v===undefined?'—':`<span class=${v>0?'pos':v<0?'neg':''}>${v>0?'+':''}${v.toFixed(2)}</span>`;
- const tbl=(rows)=>'<div class=scroll><table><tr><th>分組<th>組<th>筆<th>勝率<th>PF<th>平均R<th>總R</tr>'+rows.map(x=>
-   `<tr><td>${x.tag}<td class=lbl>${x.group}<td>${x.n}<td>${x.win!=null?x.win+'%':'—'}<td>${fx(x.pf)}<td>${cr(x.avg)}<td>${fx(x.tot,1)}</tr>`).join('')+'</table></div>';
+ const half=(v,n)=>n?cr(v)+` <span class=meta>(${n})</span>`:'—';
+ const tbl=(rows)=>{const hs=rows.some(x=>x.first_n!==undefined);
+  return '<div class=scroll><table><tr><th>分組<th>組<th>筆<th>勝率<th>PF<th>平均R<th>總R'+(hs?'<th>前段<th>後段':'')+'</tr>'+rows.map(x=>
+   `<tr><td>${x.tag}<td class=lbl>${x.group}<td>${x.n}<td>${x.win!=null?x.win+'%':'—'}<td>${fx(x.pf)}<td>${cr(x.avg)}<td>${fx(x.tot,1)}`+
+   (hs?`<td>${half(x.first,x.first_n)}<td>${half(x.second,x.second_n)}`:'')+'</tr>').join('')+'</table></div>'};
+ const oit=(L)=>'<div class=scroll><table><tr><th>標籤<th>判讀<th>高−低<th>p<th>低組<th>中組<th>高組</tr>'+L.map(x=>{const g={};(x.groups||[]).forEach(y=>g[y.name]=y);
+   const c=y=>y?`${cr(y.avg)} <span class=meta>${y.n}筆 ${y.rng}</span>`:'—';
+   return `<tr><td>${x.name}<td class=${(x.verdict||'').startsWith('候選')?'hot':'meta'}>${x.verdict||''}<td>${x.diff!=null?cr(x.diff):'—'}<td>${x.p??'—'}<td>${c(g['低'])}<td>${c(g['中'])}<td>${c(g['高'])}</tr>`}).join('')+'</table></div>';
  let h=`<b>${r.status}</b>`;
- for(const e of ['G','F']){
-  if(r.live&&r.live.report)h+=`<h2 style=margin-top:12px>引擎 ${e} · 實盤（${r.live.time}）</h2>`+tbl(r.live.report[e]);
-  if(r.trigger&&r.trigger.report)h+=`<h2 style=margin-top:12px>引擎 ${e} · 無偏差母體 ${r.trigger.days} 天（${r.trigger.time}，${r.trigger.symbols} 檔 ${r.trigger.segments} 段）</h2>`+tbl(r.trigger.report[e])}
+ const T_=r.trigger||{};
+ if(T_.split)h+=`<div class=meta>無偏差母體前後段分界 ${T_.split}`+(T_.oi_missing?` · OI 每日檔 ${T_.oi_missing} 天抓取失敗（那幾筆歸缺）`:'')+'</div>';
+ for(const e of ['C','G','F']){
+  if(r.live&&r.live.report&&r.live.report[e])h+=`<h2 style=margin-top:12px>引擎 ${e} · 實盤（${r.live.time}）</h2>`+tbl(r.live.report[e]);
+  if(T_.report&&T_.report[e])h+=`<h2 style=margin-top:12px>引擎 ${e} · 無偏差母體 ${T_.days} 天（${T_.time}，${T_.symbols} 檔 ${T_.segments} 段）</h2>`+tbl(T_.report[e]);
+  if(T_.oi&&T_.oi[e])h+=`<div class=meta style=margin-top:6px>${e} · OI 與 24h 區間三等分（置換檢定＋前後段同向才算候選）</div>`+oit(T_.oi[e])}
  o.innerHTML=h;
  if(!/^(完成|失敗|中止)/.test(r.status))setTimeout(popload,5000)}
 async function fwload(){const o=$('fwout');const r=await (await F('/api/forward')).json();
