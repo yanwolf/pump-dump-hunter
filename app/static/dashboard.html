@@ -289,6 +289,8 @@ async function popload(){const o=$('popout');const r=await (await F('/api/popula
    `<tr><td class=lbl>${x.name}<td>${x.n}<td>${x.win!=null?x.win+'%':'—'}<td>${fx(x.pf)}<td>${cr(x.avg)}<td>${fx(x.tot,1)}<td>${half(x.first,x.first_n)}<td>${half(x.second,x.second_n)}</tr>`).join('')+'</table></div>';
   h+='<div class=meta style=margin-top:6px>滑價（%，對我們不利為正）</div><div class=scroll><table><tr><th>延遲<th>動作<th>筆<th>平均<th>中位<th>90%<th>最差</tr>'+(S_.slips||[]).map(x=>
    `<tr><td>${x.latency}<td>${x.kind}<td>${x.n}<td>${x.avg}<td>${x.med}<td>${x.p90}<td>${x.worst}</tr>`).join('')+'</table></div>';
+  if(S_.sources)h+=`<div class=meta>逐筆成交來源：${Object.entries(S_.sources).map(([k,v])=>k+' '+v+' 筆').join(' · ')}</div>`;
+  if(S_.errors&&S_.errors.length)h+='<div class=meta>失敗原因（前幾名）：'+S_.errors.map(x=>`${x.msg}（${x.n}）`).join(' · ')+'</div>';
   const D=S_.depth||{};
   h+=`<div class=meta>訂單簿：進場時 1% 內深度有資料 ${D.n||0} 筆，部位／深度中位數 ${D.med??'—'}，超過一半 ${D.over_half||0} 筆、超過全部 ${D.over_one||0} 筆（以可用 ${S_.usable}U、每筆風險照 C 設定算）</div>`}
  const T_=r.trigger||{};

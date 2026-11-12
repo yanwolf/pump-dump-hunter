@@ -293,8 +293,43 @@ def book_depth_1pct(symbol, t_ms, side_pct, fetch=None):
     except Exception as e:
         print("bookDepth", symbol, ymd, e); return None
 
-def slip_hook(B, usable):
-    """run_trigger 的 hook：每筆 C 用實盤機制重走（參考價、主網 1 秒／3 秒延遲），加訂單簿 1% 深度。"""
+AGG = "https://data.binance.vision/data/futures/um/daily/aggTrades/{s}/{s}-aggTrades-{d}.zip"
+
+def _http_big(url):
+    """逐筆成交的每日檔可能幾十 MB：逾時放寬。404 回 None，其他錯誤往上拋。"""
+    import urllib.error, urllib.request
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "pdh-research"}), timeout=180) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404: return None
+        raise
+
+def vision_getter(symbol, t0, t1, fetch=None):
+    """data.binance.vision 每日 aggTrades 檔（主網、不佔 API 權重、沒有一年限制），只留 [t0, t1] 之內的成交。
+    回傳 (get, 筆數)。欄位：agg_trade_id, price, quantity, first_id, last_id, transact_time, is_buyer_maker（有沒有表頭都吃）。"""
+    import bisect, csv, io, zipfile
+    from . import labels
+    rows = []
+    d = t0 - t0 % DAY
+    while d <= t1:
+        raw = (fetch or _http_big)(AGG.format(s=symbol, d=labels._ymd(d)))
+        if raw is not None:
+            z = zipfile.ZipFile(io.BytesIO(raw)) if isinstance(raw, bytes) else None
+            fh = io.TextIOWrapper(z.open(z.namelist()[0]), encoding="utf-8") if z else io.StringIO(raw)
+            for r in csv.reader(fh):
+                if not r or not r[0].strip().isdigit(): continue              # 表頭
+                t = int(r[5]); t = t // 1000 if t > 10**14 else t            # 微秒 → 毫秒（保險）
+                if t0 <= t <= t1: rows.append((t, float(r[1]), r[6].strip().lower() == "true"))
+        d += DAY
+    rows.sort(); ts = [x[0] for x in rows]
+    def get(a, b):
+        return rows[bisect.bisect_left(ts, a):bisect.bisect_right(ts, b)]
+    return get, len(rows)
+
+def slip_hook(B, usable, vision_fetch=None):
+    """run_trigger 的 hook：每筆 C 用實盤機制重走（參考價、主網 1 秒／3 秒延遲），加訂單簿 1% 深度。
+    逐筆成交先問 API（/fapi/v1/aggTrades）；出錯或查不到就改用 data.binance.vision 的每日檔。每筆記下用了哪個來源、失敗原因。"""
     from . import config as C, replay
     from .signals import ENGINES as ENG
     def hook(s, eid, k, i, tr):
@@ -305,14 +340,36 @@ def slip_hook(B, usable):
         out = dict(stop0=sig.stop, entry_ref=sig.entry)
         ref = replay.replay(k, i, sig.entry, sig.stop, R, replay.ref_fill, d=d)
         out["r_ref"] = ref["r"] if ref else None
-        get = agg_getter(B, s)
+        t0 = k[i]["t"]; t1 = t0 + (R["max_hold_bars"] + 3) * 300000 + 120000
+        api = agg_getter(B, s); vis = []
+        def run(get, L):
+            miss, seen = [], [0]
+            def g(a, b):
+                rows = get(a, b); seen[0] += len(rows); return rows
+            f = replay.trade_fill(g, L, d=d)
+            def fw(kind, t, ref_, end):
+                px = f(kind, t, ref_, end)
+                if px is None: miss.append(kind)
+                return px
+            res = replay.replay(k, i, sig.entry, sig.stop, R, fw, d=d)
+            why = None if res else (f"{miss[0]} 找不到成交" if seen[0] else "那段時間沒有任何成交資料") if miss else "重走失敗"
+            return res, why
         for L in LATENCIES:
+            res, src, errs = None, None, []
             try:
-                res = replay.replay(k, i, sig.entry, sig.stop, R, replay.trade_fill(get, L, d=d), d=d)
+                res, why = run(api, L); src = "API"
+                if not res: errs.append(f"API：{why}")
             except B.RateLimited: raise
-            except Exception as e:
-                out["slip_err"] = str(e)[:80]; res = None
+            except Exception as e: errs.append(f"API：{str(e)[:60]}")
+            if not res:
+                try:
+                    if not vis: vis.append(vision_getter(s, t0, t1, vision_fetch)[0])
+                    res, why = run(vis[0], L); src = "每日檔"
+                    if not res: errs.append(f"每日檔：{why}")
+                except Exception as e: errs.append(f"每日檔：{str(e)[:60]}")
             out[f"r_{L}"] = res["r"] if res else None
+            out[f"src_{L}"] = src if res else "失敗"
+            if errs: out[f"err_{L}"] = "；".join(errs)
             out[f"slips_{L}"] = [(kd, replay.slip_pct("open" if kd == "open" else "close", ref_, px, d)) for kd, ref_, px, _ in res["fills"] if kd != "eod"] if res else None
         notional = usable * R["risk_pct"] / (abs(sig.stop - sig.entry) / sig.entry)
         dep = book_depth_1pct(s, k[i]["t"] + 300000, -1.0 if d < 0 else 1.0)
@@ -342,7 +399,14 @@ def slip_report(trades, split_ts):
     dr = [t["depth_ratio"] for t in trades if isinstance(t.get("depth_ratio"), (int, float))]
     depth = dict(n=len(dr), med=_q(dr, 0.5), over_half=sum(1 for x in dr if x > 0.5), over_one=sum(1 for x in dr if x > 1))
     missing = sum(1 for t in trades if t.get("r_1000") is None)
-    return dict(rows=rows, slips=slips, depth=depth, missing=missing)
+    src, errs = {}, {}
+    for t in trades:
+        for L in LATENCIES:
+            k_ = f"{L // 1000} 秒：{t.get(f'src_{L}') or '沒跑'}"; src[k_] = src.get(k_, 0) + 1
+            for e in (t.get(f"err_{L}") or "").split("；"):
+                if e: errs[e] = errs.get(e, 0) + 1
+    top = sorted(errs.items(), key=lambda x: -x[1])[:6]
+    return dict(rows=rows, slips=slips, depth=depth, missing=missing, sources=src, errors=[dict(msg=m, n=n) for m, n in top])
 
 def main():
     from . import binance as B, presets, sweep

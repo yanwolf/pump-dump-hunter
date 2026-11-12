@@ -131,4 +131,36 @@ check("R7", "訂單簿深度有資料（部位／深度很小）", sl.get("depth
 check("R7", "結束推播一次", len([m for m in TG if m.startswith("🔬 母體偏差檢查完成（C 主網成交重算")]) == 1, f"{TG}")
 for v in ("POP_JOB", "POP_DAYS", "POP_ENGINES"): os.environ.pop(v, None)
 
+print("API 查不到 → 改用 data.binance.vision 每日檔；原因記下來")
+fx = fresh()
+import io, zipfile
+assert hasattr(population, "vision_getter"); assert hasattr(population, "slip_hook")
+csv_rows = ["agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker"]
+for x in k6:
+    for sec in range(0, 300, 1):
+        tt = x["t"] + sec * 1000
+        csv_rows.append(f"{tt},{x['o']},1,1,1,{tt},{'true' if sec % 2 == 0 else 'false'}")
+buf = io.BytesIO(); zipfile.ZipFile(buf, "w").writestr("X.csv", "\n".join(csv_rows))
+urls = []
+vf = lambda u: (urls.append(u), buf.getvalue())[1]
+w0 = T0 + 600000
+gv, nv = population.vision_getter("XUSDT", w0, w0 + 300000, fetch=vf)
+check("R8", "（前提）每日檔：有表頭也吃，只留窗口內的成交（5 分鐘含兩端 ＝ 301 筆）", nv == 301 and all(w0 <= x[0] <= w0 + 300000 for x in gv(0, 10**15)), f"{nv}")
+check("R8", "走 data.binance.vision 的 USD-M aggTrades 每日檔", urls and "data.binance.vision/data/futures/um/daily/aggTrades/XUSDT/XUSDT-aggTrades-" in urls[0], f"{urls[:1]}")
+B._get = lambda path, params=None, **kw: []                    # 這次失敗的樣子：API 回空
+B._sleep = lambda s_: None
+labels._http = lambda u: None
+hook = population.slip_hook(B, 1125.0, vision_fetch=vf)
+i6 = next((j for j, x in enumerate(k6) if bt and x["t"] == T0 + bt[0]["t"]), None)
+out = hook("XUSDT", "C", k6, i6, {}) if i6 is not None else {}
+check("R8", "API 回空 → 兩種延遲都改用每日檔算出來", out.get("src_1000") == "每日檔" and out.get("src_3000") == "每日檔"
+      and isinstance(out.get("r_1000"), float), f"{ {k_: v for k_, v in out.items() if k_.startswith(('src', 'r_', 'err'))} }")
+check("R8", "原因記下來：API 那段時間沒有任何成交資料", "API：那段時間沒有任何成交資料" in out.get("err_1000", ""), f"{out.get('err_1000')}")
+def boom(path, params=None, **kw): raise RuntimeError("HTTP 400 {\"code\":-1130}")
+B._get = boom
+out2 = hook("XUSDT", "C", k6, i6, {}) if i6 is not None else {}
+check("R8", "API 出錯也改用每日檔，錯誤訊息照記", out2.get("src_1000") == "每日檔" and "HTTP 400" in out2.get("err_1000", ""), f"{out2.get('err_1000')}")
+sr = population.slip_report([dict(out, bar_t=0, r=0.1), dict(out2, bar_t=0, r=0.1)], 1)
+check("R8", "報表列出來源與失敗原因", sr["sources"].get("1 秒：每日檔") == 2 and any("HTTP 400" in e["msg"] for e in sr["errors"]), f"{sr['sources']} {sr['errors']}")
+
 finish()
