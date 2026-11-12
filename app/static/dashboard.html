@@ -95,7 +95,8 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
       「C、F 一年」：最近 90 天是已經看過的資料，之前 275 天是樣本外；F 的「24h 區間 ≥80%」是 11-12 預先登記的門檻，只用樣本外判讀。跑好幾個小時，宇宙只有現存的幣（一年的生存者偏差比 90 天大）。</div>
     <div class=row style=margin-top:8px><button class=go onclick="popstart('live')">實盤對照</button>
       <button class=go onclick="popstart('trigger')">無偏差母體（90 天）</button>
-      <button class=go onclick="popstart('trigger',365,'C,F')">C、F 一年（樣本外）</button><button onclick="popload()">更新</button></div>
+      <button class=go onclick="popstart('trigger',365,'C,F')">C、F 一年（樣本外）</button>
+      <button class=go onclick="popstart('slip',365,'C')">C 主網成交重算（一年）</button><button onclick="popload()">更新</button></div>
     <div class=meta style=margin-top:6px>圖例：<b>母體</b> 在／不在＝進場那天（UTC）有沒有達到回測母體標準（G 當天漲 ≥30%、F 當天跌 ≥30%，用到進場之後的價格）·
       <b>名單</b> 會盯／不會盯＝進場時 24h 漲 ≥40% 或跌 ≤−30% · <b>24h區間</b>＝進場時 24h 高／低 − 1 · 缺＝算不出來</div>
     <div id=popout class=meta>尚未執行</div>
@@ -281,6 +282,15 @@ async function popload(){const o=$('popout');const r=await (await F('/api/popula
    const c=y=>y?`${cr(y.avg)} <span class=meta>${y.n}筆 ${y.rng}</span>`:'—';
    return `<tr><td>${x.name}<td class=${(x.verdict||'').startsWith('候選')?'hot':'meta'}>${x.verdict||''}<td>${x.diff!=null?cr(x.diff):'—'}<td>${x.p??'—'}<td>${c(g['低'])}<td>${c(g['中'])}<td>${c(g['高'])}</tr>`}).join('')+'</table></div>';
  let h=`<b>${r.status}</b>`;
+ const S_=r.slip;
+ if(S_&&S_.rows){
+  h+=`<h2 style=margin-top:12px>C · 主網成交重算 ${S_.days} 天（${S_.time}，${S_.n} 筆`+(S_.missing?`，${S_.missing} 筆查不到主網成交`:'')+`）</h2>`;
+  h+='<div class=scroll><table><tr><th>情境<th>筆<th>勝率<th>PF<th>平均R<th>總R<th>'+S_.halves[0]+'<th>'+S_.halves[1]+'</tr>'+S_.rows.map(x=>
+   `<tr><td class=lbl>${x.name}<td>${x.n}<td>${x.win!=null?x.win+'%':'—'}<td>${fx(x.pf)}<td>${cr(x.avg)}<td>${fx(x.tot,1)}<td>${half(x.first,x.first_n)}<td>${half(x.second,x.second_n)}</tr>`).join('')+'</table></div>';
+  h+='<div class=meta style=margin-top:6px>滑價（%，對我們不利為正）</div><div class=scroll><table><tr><th>延遲<th>動作<th>筆<th>平均<th>中位<th>90%<th>最差</tr>'+(S_.slips||[]).map(x=>
+   `<tr><td>${x.latency}<td>${x.kind}<td>${x.n}<td>${x.avg}<td>${x.med}<td>${x.p90}<td>${x.worst}</tr>`).join('')+'</table></div>';
+  const D=S_.depth||{};
+  h+=`<div class=meta>訂單簿：進場時 1% 內深度有資料 ${D.n||0} 筆，部位／深度中位數 ${D.med??'—'}，超過一半 ${D.over_half||0} 筆、超過全部 ${D.over_one||0} 筆（以可用 ${S_.usable}U、每筆風險照 C 設定算）</div>`}
  const T_=r.trigger||{};
  if(T_.prereg)for(const [e,v] of Object.entries(T_.prereg))
   h+=`<div style=margin-top:8px><b class=${v.verdict==='樣本外成立'?'hot':''}>預先登記 ${e}：${v.rule} → ${v.verdict}</b><div class=meta>樣本外門檻內 ${v.hit.n} 筆 平均 ${v.hit.avg??'—'}R PF ${v.hit.pf??'—'} · 門檻外 ${v.rest.n} 筆 平均 ${v.rest.avg??'—'}R</div></div>`;

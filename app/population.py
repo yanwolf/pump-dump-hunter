@@ -49,7 +49,7 @@ def start(job, days=90, closed=None, engines=ENGINES):
     global _proc
     from . import labels, sweep
     engines = tuple(e for e in ENGINES if e in (engines or ()))
-    if job not in ("live", "trigger") or not engines or running() or sweep.running() or labels.running(): return False
+    if job not in ("live", "trigger", "slip") or not engines or running() or sweep.running() or labels.running(): return False
     if job == "live":
         rows = [dict(symbol=t.get("symbol"), engine=t.get("engine"), r=t.get("r"), bar_t=t.get("bar_t") or t.get("ts"),
                      closed=t.get("closed")) for t in (closed or [])
@@ -199,7 +199,7 @@ def prereg_verdict(trades, split_ts):
         out[eid] = dict(rule=f"{key} ≥ {th:g}%", hit=sa, rest=sb, verdict=why)
     return out
 
-def run_trigger(B, kdir, days, engines=ENGINES):
+def run_trigger(B, kdir, days, engines=ENGINES, hook=None):
     from . import backtest
     end = int(time.time() * 1000) // HOUR * HOUR; start = end - days * DAY
     syms = B.perp_symbols(); tick = B.ticker_24h()
@@ -224,8 +224,10 @@ def run_trigger(B, kdir, days, engines=ENGINES):
                     for tr in backtest.simulate(k, (eid,)):
                         if tr["t"] < keep or tr["t"] not in idx: continue
                         hi, lo, pc = day_stats(h1, tr["t"])
-                        out.append(dict(symbol=s, engine=eid, r=tr["r"], bar_t=tr["t"], bar=sp["bar"], reason=tr["reason"],
-                                        **entry_tags(eid, k, idx[tr["t"]], hi, lo, pc, per_day=per_day)))
+                        row = dict(symbol=s, engine=eid, r=tr["r"], bar_t=tr["t"], bar=sp["bar"], reason=tr["reason"],
+                                   **entry_tags(eid, k, idx[tr["t"]], hi, lo, pc, per_day=per_day))
+                        if hook: row.update(hook(s, eid, k, idx[tr["t"]], tr) or {})
+                        out.append(row)
     return out, nseg, len(syms), start
 
 def add_oi(trades, kdir, fetch=None):
@@ -248,18 +250,122 @@ def add_oi(trades, kdir, fetch=None):
         t.update(labels.oi_labels(sorted(rows), t["bar_t"] + t.get("bar", 60000)))
     return miss, notyet
 
+# ---------- 主網成交重算（slip）----------
+LATENCIES = (1000, 3000)                    # 送單延遲的兩種情境（毫秒）
+BOOK = "https://data.binance.vision/data/futures/um/daily/bookDepth/{s}/{s}-bookDepth-{d}.zip"
+
+def agg_getter(B, symbol, pause=1.5):
+    """主網 /fapi/v1/aggTrades（權重 20，只能查一年內、一次 < 1 小時）。同一筆交易內快取；滿 1000 筆就往後翻頁。
+    每次請求後停 pause 秒（約 800 權重／分鐘，留一大半給實盤）。限流照樣往上拋（整個工作中止）。"""
+    cache = {}
+    def get(a, b):
+        key = (a, b)
+        if key in cache: return cache[key]
+        out, start = [], a
+        while True:
+            rows = B._get("/fapi/v1/aggTrades", dict(symbol=symbol, startTime=int(start), endTime=int(b), limit=1000))
+            B._sleep(pause)
+            out += [(int(x["T"]), float(x["p"]), bool(x["m"])) for x in rows]
+            if len(rows) < 1000 or not rows: break
+            start = int(rows[-1]["T"]) + 1
+            if start > b: break
+        cache[key] = out
+        return out
+    return get
+
+def book_depth_1pct(symbol, t_ms, side_pct, fetch=None):
+    """data.binance.vision bookDepth：t_ms 之前最近一筆快照，side_pct（-1＝買方 1% 內、+1＝賣方 1% 內）的名目金額。
+    檔案格式不對或抓不到就回 None。"""
+    import csv, io, zipfile
+    from . import labels
+    ymd = labels._ymd(t_ms)
+    try:
+        raw = (fetch or labels._http)(BOOK.format(s=symbol, d=ymd))
+        if raw is None: return None
+        if isinstance(raw, bytes):
+            z = zipfile.ZipFile(io.BytesIO(raw)); raw = z.read(z.namelist()[0]).decode()
+        best = None
+        for r in csv.DictReader(io.StringIO(raw)):
+            if float(r["percentage"]) != side_pct: continue
+            ts = labels._parse_ts(r["timestamp"])
+            if ts <= t_ms and (best is None or ts > best[0]): best = (ts, float(r["notional"]))
+        return best[1] if best and t_ms - best[0] <= 10 * 60000 else None
+    except Exception as e:
+        print("bookDepth", symbol, ymd, e); return None
+
+def slip_hook(B, usable):
+    """run_trigger 的 hook：每筆 C 用實盤機制重走（參考價、主網 1 秒／3 秒延遲），加訂單簿 1% 深度。"""
+    from . import config as C, replay
+    from .signals import ENGINES as ENG
+    def hook(s, eid, k, i, tr):
+        sig = ENG[eid](k, i)
+        if not sig: return dict(slip_err="訊號重算不出來")
+        R = {**C.RISK, **C.EXIT.get(eid, {})}
+        d = 1 if sig.side == "LONG" else -1
+        out = dict(stop0=sig.stop, entry_ref=sig.entry)
+        ref = replay.replay(k, i, sig.entry, sig.stop, R, replay.ref_fill, d=d)
+        out["r_ref"] = ref["r"] if ref else None
+        get = agg_getter(B, s)
+        for L in LATENCIES:
+            try:
+                res = replay.replay(k, i, sig.entry, sig.stop, R, replay.trade_fill(get, L, d=d), d=d)
+            except B.RateLimited: raise
+            except Exception as e:
+                out["slip_err"] = str(e)[:80]; res = None
+            out[f"r_{L}"] = res["r"] if res else None
+            out[f"slips_{L}"] = [(kd, replay.slip_pct("open" if kd == "open" else "close", ref_, px, d)) for kd, ref_, px, _ in res["fills"] if kd != "eod"] if res else None
+        notional = usable * R["risk_pct"] / (abs(sig.stop - sig.entry) / sig.entry)
+        dep = book_depth_1pct(s, k[i]["t"] + 300000, -1.0 if d < 0 else 1.0)
+        out.update(notional=round(notional, 1), depth1=dep, depth_ratio=round(notional / dep, 3) if dep else None)
+        return out
+    return hook
+
+def _q(xs, q):
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else None
+
+def slip_report(trades, split_ts):
+    """各情境的 R（全部、樣本外、最近 90 天）＋各種成交的滑價分布＋訂單簿深度。"""
+    rows = []
+    for key, name in (("r", "回測（假設滑價 0.3%）"), ("r_ref", "實盤機制、無滑價"),
+                      ("r_1000", "主網成交、延遲 1 秒"), ("r_3000", "主網成交、延遲 3 秒")):
+        ts = [t for t in trades if isinstance(t.get(key), (int, float))]
+        st = _stats([t[key] for t in ts])
+        a = [t[key] for t in ts if t["bar_t"] < split_ts]; b = [t[key] for t in ts if t["bar_t"] >= split_ts]
+        rows.append(dict(name=name, **st, first=_stats(a).get("avg"), first_n=len(a), second=_stats(b).get("avg"), second_n=len(b)))
+    slips = []
+    for L in LATENCIES:
+        for kind, nm in (("open", "進場"), ("stop", "停損"), ("tp1", "1R 減碼"), ("time", "時間出場")):
+            xs = [v for t in trades for kd, v in (t.get(f"slips_{L}") or []) if kd == kind and v is not None]
+            if xs: slips.append(dict(latency=f"{L // 1000} 秒", kind=nm, n=len(xs), avg=round(sum(xs) / len(xs), 3),
+                                     med=_q(xs, 0.5), p90=_q(xs, 0.9), worst=max(xs)))
+    dr = [t["depth_ratio"] for t in trades if isinstance(t.get("depth_ratio"), (int, float))]
+    depth = dict(n=len(dr), med=_q(dr, 0.5), over_half=sum(1 for x in dr if x > 0.5), over_one=sum(1 for x in dr if x > 1))
+    missing = sum(1 for t in trades if t.get("r_1000") is None)
+    return dict(rows=rows, slips=slips, depth=depth, missing=missing)
+
 def main():
     from . import binance as B, presets, sweep
     job = os.environ.get("POP_JOB", "live"); days = int(os.environ.get("POP_DAYS", "90"))
     try: presets.apply_live()
     except Exception as e: print("population apply_live:", e)
-    key = "live" if job == "live" else "trigger"
+    key = {"live": "live", "trigger": "trigger", "slip": "slip"}.get(job, "trigger")
     _write(status="準備中…", job=job, started=time.strftime("%m-%d %H:%M"))
     try:
         if job == "live":
             tr, skipped = run_live(B, sweep.KDIR)
             res = dict(time=time.strftime("%m-%d %H:%M"), n=len(tr), skipped=skipped, report=report(tr))
             msg = f"完成（實盤對照）：{len(tr)} 筆" + (f"，{skipped} 筆缺進場時間或 K 線，沒算" if skipped else "")
+        elif job == "slip":
+            from . import config as C_
+            usable = C_.SIZING["cap"] * (1 - C_.SIZING["reserve_pct"])
+            tr, nseg, nsym, start = run_trigger(B, sweep.KDIR, days, ("C",), hook=slip_hook(B, usable))
+            end = start + days * DAY
+            split = end - RECENT if days * DAY > RECENT else start + days * DAY // 2
+            sr = slip_report(tr, split)
+            res = dict(time=time.strftime("%m-%d %H:%M"), days=days, n=len(tr), usable=usable, **sr,
+                       halves=[f"之前 {days - 90} 天（樣本外）", "最近 90 天"] if days * DAY > RECENT else ["前段", "後段"])
+            msg = f"完成（C 主網成交重算 {days} 天）：{len(tr)} 筆；" + "；".join(f"{x['name']} 平均 {x.get('avg')}R PF {x.get('pf')}" for x in sr["rows"])
         else:
             engines = tuple(e for e in os.environ.get("POP_ENGINES", ",".join(ENGINES)).split(",") if e in ENGINES)
             tr, nseg, nsym, start = run_trigger(B, sweep.KDIR, days, engines)
