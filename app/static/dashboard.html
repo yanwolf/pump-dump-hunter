@@ -101,6 +101,17 @@ button.go{background:var(--gold);color:#0f1114;border-color:var(--gold);font-wei
       <b>名單</b> 會盯／不會盯＝進場時 24h 漲 ≥40% 或跌 ≤−30% · <b>24h區間</b>＝進場時 24h 高／低 − 1 · 缺＝算不出來</div>
     <div id=popout class=meta>尚未執行</div>
   </div>
+  <div class=card><h2>清算反轉＋熬鷹（外部訊號複製，研究用，不動實盤）</h2>
+    <div class=meta><b>清算反轉</b>（5m）：5 分鐘 OI 下降當清算推估（價跌＝多頭被清、價漲＝空頭被軋），4 小時內單邊 ≥2% OI 而且 ≥3 倍反向、
+      價格已離開 4h 極值 0.5% → 反向掛限價；止損極值外 0.3%，目標 1.5R 減半保本／3R，4h 沒成交撤單、最多 72h。OI 用 data.binance.vision 每日檔（可回測一年）。<br>
+      <b>熬鷹</b>（1h，放空）：RSI≥75、24h 漲 ≥4%、站上 240h 均線、收在 24h 高點 1% 內；止損 +1.5%、目標 −2.5%／−4%，4h 沒成交撤單、最多 72h。<br>
+      參數照對方公布的說明、11-19 預先登記沒調過。判讀看<b>淨值</b>（掛單 maker 0.02%、止損 taker 0.05%＋滑價 0.05%）：≥30 筆、淨平均 R > 0、前後段都 > 0 才算成立。
+      「最近 30 天」那列可以跟對方公布的戰績對照（它不含手續費＝這裡的「毛」）。跟上面幾個研究工作互斥，跑完推播。</div>
+    <div class=row style=margin-top:8px><input id=lqs placeholder="幣（空白＝預設 BTC ETH SOL BNB XRP DOGE PAXG SOXL TQQQ）" style="flex:1;min-width:180px"></div>
+    <div class=row style=margin-top:6px><span class=meta>清算</span><input id=lqd type=number value=180 style="width:55px"><span class=meta>天 · 熬鷹</span><input id=lqad type=number value=1095 style="width:60px"><span class=meta>天</span>
+      <button class=go onclick="lqstart()">開始</button><button onclick="lqload()">更新</button></div>
+    <div id=lqout class=meta>尚未執行</div>
+  </div>
   <div class=card><h2>OI 前瞻驗證（實盤 F／G，只記不過濾）</h2>
     <div class=meta>每筆 F／G 訊號記下開倉當下的 OI 標籤，平倉後依回測的三等分界線分組。界線在第一次打開這裡時從籌碼標籤分析凍結，之後重跑分析也不會改。
       要驗證的假設：F 的 OI 在掉（1h 變化、距 24h 高點的低組）較好；G 的 OI 1h 中間組較好。每組至少累積 30 筆再下結論。</div>
@@ -303,6 +314,23 @@ async function popload(){const o=$('popout');const r=await (await F('/api/popula
   if(T_.oi&&T_.oi[e])h+=`<div class=meta style=margin-top:6px>${e} · OI 與 24h 區間三等分（置換檢定＋前後段同向才算候選）</div>`+oit(T_.oi[e])}
  o.innerHTML=h;
  if(!/^(完成|失敗|中止)/.test(r.status))setTimeout(popload,5000)}
+async function lqstart(){const r=await (await F('/api/liqrev/start?s='+encodeURIComponent($('lqs').value)+'&d='+$('lqd').value+'&ad='+$('lqad').value)).json();
+ if(!r.started){alert(r.error||'沒有啟動');return}setTimeout(lqload,1500)}
+async function lqload(){const o=$('lqout');const r=await (await F('/api/liqrev')).json();
+ if(!r.status){o.innerHTML='尚未執行';return}
+ const cr=(v,d=2)=>v===null||v===undefined?'—':`<span class=${v>0?'pos':v<0?'neg':''}>${v>0?'+':''}${v.toFixed(d)}</span>`;
+ const one=(nm,X)=>{if(!X||!X.report)return '';const R=X.report,c=R.counts||{};
+  let h=`<h2 style=margin-top:12px>${nm} · ${X.days} 天（${X.time}，${(X.symbols||[]).length} 檔）</h2>`;
+  h+=`<div><b class=${R.verdict.startsWith('成立')?'hot':''}>判讀：${R.verdict}</b> <span class=meta>· 發出 ${c.issued||0} · 成交 ${c.filled||0} · 過期 ${c.expired||0} · 前後段分界 ${R.split}`+
+   (X.missing&&X.missing.length?` · 不在幣安永續：${X.missing.join('、')}`:'')+(X.oi_missing?` · OI 每日檔 ${X.oi_missing} 天抓不到`:'')+'</span></div>';
+  const tb=(rows,k0)=>'<div class=scroll><table><tr><th>'+k0+'<th>筆<th>勝率<th>PF<th>毛 R<th>淨 R<th>毛 %<th>淨 %<th>淨總R</tr>'+rows.map(x=>
+   `<tr><td class=lbl>${x.group||x.symbol}<td>${x.n}<td>${x.win!=null?x.win+'%':'—'}<td>${x.pf??'—'}<td>${cr(x.r_gross)}<td>${cr(x.r_net)}<td>${cr(x.pct_gross,3)}<td>${cr(x.pct_net,3)}<td>${x.tot??'—'}</tr>`).join('')+'</table></div>';
+  h+=tb(R.rows,'分組')+'<div class=meta style=margin-top:6px>各幣</div>'+tb(R.symbols,'幣');
+  h+='<div class=meta>出場：'+Object.entries(R.reasons||{}).map(([k,v])=>({stop:'止損',be:'保本',tp2:'目標二',time:'時間'}[k]||k)+' '+v).join(' · ')+'</div>';
+  if(X.trades&&X.trades.length)h+='<details><summary class=meta>最近 '+X.trades.length+' 筆</summary>'+T(X.trades.slice().reverse().map(t=>({...t,time:new Date(t.t_sig).toLocaleString('zh-TW',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})})),['time','symbol','side','entry','stop','reason','r_gross','r_net','pct_net','why'])+'</details>';
+  return h};
+ o.innerHTML=`<b>${r.status}</b>`+one('熬鷹',r.ay)+one('清算反轉',r.lq);
+ if(!/^(完成|失敗|中止)/.test(r.status))setTimeout(lqload,5000)}
 async function fwload(){const o=$('fwout');const r=await (await F('/api/forward')).json();
  if(r.error){o.innerHTML=r.error;return}
  o.innerHTML=`界線凍結於 ${r.frozen_at||'—'} · 已平倉 F／G 共 ${r.n} 筆`+T(r.rows.map(x=>({...x,win:x.win!=null?x.win+'%':'',total:x.tot})),['engine','label','cut','group','n','win','pf','avg','total','hypo'])}
@@ -343,4 +371,4 @@ async function pf(){const o=$('pfout');o.innerHTML='檢查中…';
  if(r.error){o.innerHTML='<span style=color:var(--down)>'+r.error+'</span>';return}
  o.innerHTML=r.results.map(x=>`${x.status=='ok'?'✅':x.status=='warn'?'⚠️':'❌'} ${x.item}　<span class=meta>${x.msg||''}</span>`).join('<br>')+(r.cached?`<br><span class=meta>（${r.age} 秒前的結果；自檢會打高權重查詢，60 秒內不重跑）</span>`:'')}
 async function sigclear(){if(!confirm('清除「訊號」和「已平倉」紀錄？（已下單紀錄保留）'))return;await F('/api/signals/clear');load()}
-load();swload().catch(()=>{});lbload().catch(()=>{});fwload().catch(()=>{});popload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>
+load();swload().catch(()=>{});lbload().catch(()=>{});fwload().catch(()=>{});popload().catch(()=>{});lqload().catch(()=>{});pmeta().catch(()=>{});setInterval(load,60000);</script>

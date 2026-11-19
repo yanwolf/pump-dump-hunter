@@ -5,7 +5,7 @@ time.tzset()
 import base64, hashlib, hmac, json, threading, traceback, uuid
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from . import backtest, binance as B, config as C, labels, manager, population, params, presets, preflight, risk, scanner, stats, store, sweep, telegram
+from . import backtest, binance as B, config as C, labels, liqrev, manager, population, params, presets, preflight, risk, scanner, stats, store, sweep, telegram
 from .signals import ENGINES, LONG_ENGINES, ENGINE_TF
 
 ENABLED = set(os.environ.get("ENGINES", "C,F,G").split(","))
@@ -567,7 +567,7 @@ def norm_symbol(s):
 PAGE = (Path(__file__).parent / "static" / "dashboard.html").read_text(encoding="utf-8")
 
 
-WRITE = ("/api/pos", "/api/signals/clear", "/api/sweep/start", "/api/sweep/clear", "/api/labels/start", "/api/population/start")
+WRITE = ("/api/pos", "/api/signals/clear", "/api/sweep/start", "/api/sweep/clear", "/api/labels/start", "/api/population/start", "/api/liqrev/start")
 _fail = dict(n=0, t=0)
 
 class H(BaseHTTPRequestHandler):
@@ -687,6 +687,15 @@ class H(BaseHTTPRequestHandler):
             eng = tuple(q.get("e", ["C,F,G"])[0].split(","))
             ok = population.start(job, d, store.get().get("closed", []), eng)
             body, ct = json.dumps(dict(started=ok, error=None if ok else "已有母體檢查、籌碼分析或歷史事件掃描在跑，等它跑完"), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/liqrev/start"):
+            import urllib.parse
+            q = urllib.parse.parse_qs(self.path.split("?")[-1]) if "?" in self.path else {}
+            try: d = max(14, min(int(q.get("d", ["180"])[0]), 365)); ad = max(60, min(int(q.get("ad", ["1095"])[0]), 1825))
+            except ValueError: d, ad = 180, 1095
+            ok, err = liqrev.start(liqrev.parse_symbols(q.get("s", [""])[0]), d, ad)
+            body, ct = json.dumps(dict(started=ok, error=err), ensure_ascii=False).encode(), "application/json; charset=utf-8"
+        elif self.path.startswith("/api/liqrev"):
+            body, ct = json.dumps(liqrev.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/population"):
             body, ct = json.dumps(population.state(), ensure_ascii=False).encode(), "application/json; charset=utf-8"
         elif self.path.startswith("/api/forward"):

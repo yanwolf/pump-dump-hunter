@@ -47,9 +47,9 @@ def running():
 def start(job, days=90, closed=None, engines=ENGINES):
     """job: live | trigger。engines 只對 trigger 有用（例如只跑 C、F）。跟歷史事件掃描、籌碼標籤分析互斥。"""
     global _proc
-    from . import labels, sweep
+    from . import labels, liqrev, sweep
     engines = tuple(e for e in ENGINES if e in (engines or ()))
-    if job not in ("live", "trigger", "slip") or not engines or running() or sweep.running() or labels.running(): return False
+    if job not in ("live", "trigger", "slip") or not engines or running() or sweep.running() or labels.running() or liqrev.running(): return False
     if job == "live":
         rows = [dict(symbol=t.get("symbol"), engine=t.get("engine"), r=t.get("r"), bar_t=t.get("bar_t") or t.get("ts"),
                      closed=t.get("closed")) for t in (closed or [])
